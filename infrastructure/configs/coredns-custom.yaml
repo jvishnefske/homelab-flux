@@ -1,0 +1,24 @@
+# The router has no hairpin NAT: from inside the LAN the public IP that
+# ${SITE_HOST} resolves to is unreachable. Inside the cluster, answer every
+# name under it with the APU2 (the router's 80/443 target), so cert-manager's
+# HTTP-01 self-check and server-side OAuth calls (Gerrit/Gitea -> Keycloak)
+# take the same path as the internet. k3s's CoreDNS imports *.server keys.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  site.server: |
+    ${SITE_HOST}:53 {
+      errors
+      cache 30
+      template IN A ${SITE_HOST} {
+        answer "{{ .Name }} 60 IN A 192.168.1.185"
+      }
+      # No AAAA inside the cluster: clients fall back to the A record.
+      template IN AAAA ${SITE_HOST} {
+        rcode NOERROR
+      }
+      forward . /etc/resolv.conf
+    }
