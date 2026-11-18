@@ -14,10 +14,10 @@ resources:
 # Nix-built images, preloaded on the nodes (imagePullPolicy: Never).
 # newTag = git rev of the vishnefske.com repo; bumped by deploy-site.sh.
 images:
-  - { name: vishnefske/site, newTag: 84e4a8e }
-  - { name: vishnefske/pomodoro, newTag: 84e4a8e }
-  - { name: vishnefske/postgres, newTag: 84e4a8e }
-  - { name: vishnefske/keycloak, newTag: 84e4a8e }
-  - { name: vishnefske/gitea, newTag: 84e4a8e }
-  - { name: vishnefske/gerrit, newTag: 84e4a8e }
-  - { name: vishnefske/nats, newTag: 84e4a8e }
+  - { name: vishnefske/site, newTag: 8684979 }
+  - { name: vishnefske/pomodoro, newTag: 8684979 }
+  - { name: vishnefske/postgres, newTag: 8684979 }
+  - { name: vishnefske/keycloak, newTag: 8684979 }
+  - { name: vishnefske/gitea, newTag: 8684979 }
+  - { name: vishnefske/gerrit, newTag: 8684979 }
+  - { name: vishnefske/nats, newTag: 8684979 }
