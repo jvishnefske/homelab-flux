@@ -57,7 +57,7 @@ spec:
         - name: nats
           image: vishnefske/nats
           imagePullPolicy: Never
-          args: [--config, /etc/pubsub/nats.conf]
+          command: [nats-server, --config, /etc/pubsub/nats.conf]
           ports:
             - { name: client, containerPort: 4222 }
             - { name: monitor, containerPort: 8222 }
