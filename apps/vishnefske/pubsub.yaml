@@ -19,7 +19,7 @@ data:
   nats.conf: |
     server_name: pubsub
     port: 4222
-    http: 8222                # health checks only; not in the Service
+    http: 8222                # health checks; NetworkPolicy keeps it pod-private
     max_payload: 1MB
     max_connections: 1000
     write_deadline: "10s"
@@ -32,7 +32,7 @@ data:
       timeout: 5
     }
     authorization {
-      include /etc/pubsub/users/users.conf
+      include users/users.conf   # relative to this file (/etc/pubsub)
     }
 ---
 apiVersion: apps/v1
@@ -101,3 +101,18 @@ spec:
       services: [{ name: pubsub, port: 4222 }]
   tls:
     passthrough: true
+---
+# Only the client port is reachable (from Traefik and in-cluster clients, all
+# of which still need a valid cert). The monitor port (8222, /connz lists
+# connected devices) stays closed to other pods; kubelet probes come from the
+# node and are allowed by k3s's policy controller.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pubsub
+spec:
+  podSelector:
+    matchLabels: { app: pubsub }
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{ port: 4222, protocol: TCP }]
