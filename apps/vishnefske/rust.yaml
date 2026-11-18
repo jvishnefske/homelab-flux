@@ -1,0 +1,22 @@
+# https://${SITE_HOST}/rust -> EmitRust frontend under systemd on the
+# transpiler VM, outside the cluster: a selector-less Service whose endpoint
+# is set by hand.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rust
+spec:
+  ports: [{ name: http, port: 8090, targetPort: 8090 }]
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: rust-1
+  labels:
+    kubernetes.io/service-name: rust
+    endpointslice.kubernetes.io/managed-by: homelab-flux
+addressType: IPv4
+ports: [{ name: http, port: 8090, protocol: TCP }]
+endpoints:
+  - addresses: ["192.168.1.203"]
+    conditions: { ready: true }

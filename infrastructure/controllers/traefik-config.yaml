@@ -1,0 +1,30 @@
+# Tunes the Traefik that k3s installs (its helm-controller merges this into
+# the bundled chart's values).
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    # One Traefik per node. With externalTrafficPolicy Local the APU2's
+    # ServiceLB (the router's 80/443 target) only hands traffic to the
+    # Traefik on the APU2, which keeps working while the Wyse is down.
+    deployment:
+      kind: DaemonSet
+    service:
+      spec:
+        externalTrafficPolicy: Local
+    ports:
+      web:
+        # HTTP -> HTTPS, except ACME HTTP-01 challenges (cert-manager).
+        allowACMEByPass: true
+        http:
+          redirections:
+            entryPoint:
+              to: websecure
+              scheme: https
+              permanent: true
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { memory: 192Mi }

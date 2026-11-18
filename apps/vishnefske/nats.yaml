@@ -1,0 +1,71 @@
+# NATS; browsers connect over websocket at nats.${SITE_HOST}. The config
+# (with the cluster route password) is the nats-config Secret.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: nats }
+  template:
+    metadata:
+      labels: { app: nats }
+    spec:
+      nodeSelector: { kubernetes.io/hostname: wyse }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: nats
+          image: vishnefske/nats
+          imagePullPolicy: Never
+          ports:
+            - { name: client, containerPort: 4222 }
+            - { name: ws, containerPort: 8000 }
+            - { name: monitor, containerPort: 8222 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: monitor }
+          volumeMounts:
+            - { name: config, mountPath: /etc/nats, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 128Mi }
+      volumes:
+        - name: config
+          secret: { secretName: nats-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+spec:
+  selector: { app: nats }
+  ports:
+    - { name: client, port: 4222, targetPort: client }
+    - { name: ws, port: 8000, targetPort: ws }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nats
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["nats.${SITE_HOST}"]
+      secretName: nats-tls
+  rules:
+    - host: "nats.${SITE_HOST}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: nats, port: { name: ws } } }

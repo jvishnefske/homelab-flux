@@ -1,0 +1,83 @@
+# Pomodoro timer: owner logs in with Google OAuth, anyone can watch.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pomodoro-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 100Mi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pomodoro
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: pomodoro }
+  template:
+    metadata:
+      labels: { app: pomodoro }
+    spec:
+      securityContext: &sc
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: pomodoro
+          image: vishnefske/pomodoro
+          imagePullPolicy: Never
+          env:
+            - { name: PUBLIC_URL, value: "https://timer.${SITE_HOST}" }
+            - { name: OWNER_EMAIL, value: "${POMODORO_OWNER_EMAIL}" }
+            - name: SESSION_SECRET
+              valueFrom: { secretKeyRef: { name: pomodoro, key: SESSION_SECRET } }
+            - name: GOOGLE_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: pomodoro, key: GOOGLE_CLIENT_ID, optional: true } }
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: pomodoro, key: GOOGLE_CLIENT_SECRET, optional: true } }
+          ports: [{ name: http, containerPort: 8080 }]
+          readinessProbe:
+            httpGet: { path: /, port: http }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          securityContext: &csc
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: pomodoro-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pomodoro
+spec:
+  selector: { app: pomodoro }
+  ports: [{ name: http, port: 80, targetPort: http }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pomodoro
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["timer.${SITE_HOST}"]
+      secretName: pomodoro-tls
+  rules:
+    - host: "timer.${SITE_HOST}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: pomodoro, port: { name: http } } }

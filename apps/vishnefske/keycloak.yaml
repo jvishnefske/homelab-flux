@@ -1,0 +1,91 @@
+# Keycloak (auth.${SITE_HOST}), pre-built for postgres in the image.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: keycloak }
+  template:
+    metadata:
+      labels: { app: keycloak }
+    spec:
+      nodeSelector: { kubernetes.io/hostname: wyse }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: keycloak
+          image: vishnefske/keycloak
+          imagePullPolicy: Never
+          env:
+            - name: KEYCLOAK_DB_NAME
+              valueFrom: { secretKeyRef: { name: db-credentials, key: KEYCLOAK_DB_NAME } }
+            - { name: KC_DB_URL, value: "jdbc:postgresql://postgres:5432/$(KEYCLOAK_DB_NAME)" }
+            - name: KC_DB_USERNAME
+              valueFrom: { secretKeyRef: { name: db-credentials, key: KEYCLOAK_DB_USER } }
+            - name: KC_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: db-credentials, key: KEYCLOAK_DB_PASSWORD } }
+            - { name: KC_HOSTNAME, value: "https://auth.${SITE_HOST}" }
+            - { name: KC_HTTP_ENABLED, value: "true" }
+            - { name: KC_PROXY_HEADERS, value: xforwarded }
+          # KC_BOOTSTRAP_ADMIN_USERNAME / KC_BOOTSTRAP_ADMIN_PASSWORD
+          envFrom:
+            - secretRef: { name: keycloak }
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: mgmt, containerPort: 9000 }
+          startupProbe:
+            httpGet: { path: /health/started, port: mgmt }
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /health/ready, port: mgmt }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: realm, mountPath: /realm, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { memory: 1Gi }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        # Realm export to import on first start (users stripped).
+        - name: realm
+          secret: { secretName: keycloak-realm, optional: true }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+spec:
+  selector: { app: keycloak }
+  ports: [{ name: http, port: 80, targetPort: http }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["auth.${SITE_HOST}"]
+      secretName: keycloak-tls
+  rules:
+    - host: "auth.${SITE_HOST}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: keycloak, port: { name: http } } }

@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: vishnefske
+resources:
+  - namespace.yaml
+  - site.yaml
+  - rust.yaml
+  - pomodoro.yaml
+  - postgres.yaml
+  - keycloak.yaml
+  - gitea.yaml
+  - gerrit.yaml
+  - nats.yaml
+# Nix-built images, preloaded on the nodes (imagePullPolicy: Never).
+# newTag = git rev of the vishnefske.com repo; bumped by deploy-site.sh.
+images:
+  - { name: vishnefske/site, newTag: 84e4a8e }
+  - { name: vishnefske/pomodoro, newTag: 84e4a8e }
+  - { name: vishnefske/postgres, newTag: 84e4a8e }
+  - { name: vishnefske/keycloak, newTag: 84e4a8e }
+  - { name: vishnefske/gitea, newTag: 84e4a8e }
+  - { name: vishnefske/gerrit, newTag: 84e4a8e }
+  - { name: vishnefske/nats, newTag: 84e4a8e }

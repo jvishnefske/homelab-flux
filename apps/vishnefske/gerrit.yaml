@@ -1,0 +1,92 @@
+# Gerrit (git.${SITE_HOST}), OAuth login through Keycloak. Gerrit keeps its
+# data in NoteDb on the site volume; it doesn't use the postgres database.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gerrit-site
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 10Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gerrit
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: gerrit }
+  template:
+    metadata:
+      labels: { app: gerrit }
+    spec:
+      nodeSelector: { kubernetes.io/hostname: wyse }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: gerrit
+          image: vishnefske/gerrit
+          imagePullPolicy: Never
+          env:
+            - { name: CANONICAL_WEB_URL, value: "https://git.${SITE_HOST}/" }
+            - { name: KEYCLOAK_URL, value: "https://auth.${SITE_HOST}" }
+            - { name: KEYCLOAK_REALM, value: vishnefske }
+            - { name: OAUTH_CLIENT_ID, value: gerrit }
+            - { name: JAVA_OPTS, value: "-Xmx640m" }
+          # OAUTH_CLIENT_SECRET
+          envFrom:
+            - secretRef: { name: gerrit }
+          ports: [{ name: http, containerPort: 8080 }]
+          startupProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /config/server/version, port: http }
+          volumeMounts:
+            - { name: site, mountPath: /var/gerrit }
+            - { name: tmp, mountPath: /tmp }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { memory: 1280Mi }
+      volumes:
+        - name: site
+          persistentVolumeClaim: { claimName: gerrit-site }
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gerrit
+spec:
+  selector: { app: gerrit }
+  ports: [{ name: http, port: 80, targetPort: http }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gerrit
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["git.${SITE_HOST}"]
+      secretName: gerrit-tls
+  rules:
+    - host: "git.${SITE_HOST}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: gerrit, port: { name: http } } }

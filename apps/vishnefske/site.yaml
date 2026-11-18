@@ -1,0 +1,79 @@
+# Static site (www/ baked into the image), one replica per node.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: site
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }
+  selector:
+    matchLabels: { app: site }
+  template:
+    metadata:
+      labels: { app: site }
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels: { app: site }
+      securityContext: &sc
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: site
+          image: vishnefske/site
+          imagePullPolicy: Never
+          ports: [{ name: http, containerPort: 8080 }]
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+          securityContext: &csc
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+---
+# internalTrafficPolicy Local + Traefik's nativelb: each node's Traefik only
+# talks to the site replica on its own node (no dependency on the other node,
+# nor on the API server for endpoint updates).
+apiVersion: v1
+kind: Service
+metadata:
+  name: site
+  annotations:
+    traefik.ingress.kubernetes.io/service.nativelb: "true"
+spec:
+  selector: { app: site }
+  internalTrafficPolicy: Local
+  ports: [{ name: http, port: 80, targetPort: http }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: site
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["${SITE_HOST}"]
+      secretName: site-tls
+  rules:
+    - host: "${SITE_HOST}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: site, port: { name: http } } }
+          # EmitRust transpiler frontend on the transpiler VM (rust.yaml).
+          # The /rust prefix is passed through; the app expects it.
+          - path: /rust
+            pathType: Prefix
+            backend: { service: { name: rust, port: { name: http } } }
