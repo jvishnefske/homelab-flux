@@ -1,0 +1,103 @@
+# Edge pub/sub: NATS reachable from the internet at pubsub.${SITE_HOST}:443,
+# mutual TLS only. Traefik passes the TLS stream through by SNI (no
+# termination), so NATS itself verifies the client certificate against the
+# edge CA (rooted in the Wyse TPM, `edge-ca` on that host) and maps its
+# subject DN to a user with per-device subject permissions. A cert that is
+# not in the user list (revoked) is rejected. Best effort: no JetStream.
+#
+# Secrets (managed by `sudo edge-ca` on the Wyse, not by Flux):
+#   pubsub-tls    tls.crt, tls.key (server), ca.crt (edge CA)
+#   pubsub-users  users.conf
+#
+# Clients: tls://pubsub.${SITE_HOST}:443 with TLS-first handshake, their
+# cert/key, ca.crt, and inbox prefix _INBOX.<id>.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pubsub-config
+data:
+  nats.conf: |
+    server_name: pubsub
+    port: 4222
+    http: 8222                # health checks only; not in the Service
+    max_payload: 1MB
+    max_connections: 1000
+    write_deadline: "10s"
+    tls {
+      cert_file: /etc/pubsub/tls/tls.crt
+      key_file: /etc/pubsub/tls/tls.key
+      ca_file: /etc/pubsub/tls/ca.crt
+      verify_and_map: true    # client cert required + subject DN = user
+      handshake_first: true   # TLS before NATS INFO, so SNI passthrough works
+      timeout: 5
+    }
+    authorization {
+      include /etc/pubsub/users/users.conf
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pubsub
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: pubsub }
+  template:
+    metadata:
+      labels: { app: pubsub }
+    spec:
+      nodeSelector: { kubernetes.io/hostname: wyse }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: nats
+          image: vishnefske/nats
+          imagePullPolicy: Never
+          args: [--config, /etc/pubsub/nats.conf]
+          ports:
+            - { name: client, containerPort: 4222 }
+            - { name: monitor, containerPort: 8222 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: monitor }
+          volumeMounts:
+            - { name: config, mountPath: /etc/pubsub/nats.conf, subPath: nats.conf, readOnly: true }
+            - { name: tls, mountPath: /etc/pubsub/tls, readOnly: true }
+            - { name: users, mountPath: /etc/pubsub/users, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: config
+          configMap: { name: pubsub-config }
+        - name: tls
+          secret: { secretName: pubsub-tls }
+        - name: users
+          secret: { secretName: pubsub-users }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pubsub
+spec:
+  selector: { app: pubsub }
+  ports: [{ name: client, port: 4222, targetPort: client }]
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteTCP
+metadata:
+  name: pubsub
+spec:
+  entryPoints: [websecure]
+  routes:
+    - match: HostSNI(`pubsub.${SITE_HOST}`)
+      services: [{ name: pubsub, port: 4222 }]
+  tls:
+    passthrough: true
