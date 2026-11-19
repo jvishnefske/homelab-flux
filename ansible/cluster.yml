@@ -1,0 +1,178 @@
+# Out-of-band cluster configuration (the parts Flux can't hold because they
+# are secret). Idempotent; check for drift without touching anything:
+#
+#   cd ansible && ansible-playbook cluster.yml --check --diff
+#   cd ansible && ansible-playbook cluster.yml            # converge
+#
+# Sources, from a private directory that is never committed:
+#   secrets.env            KEY=value lines (see the keys used below)
+#   nats-server.conf       NATS config (has the cluster route password)
+#   vishnefske-realm.json  Keycloak realm to import (optional, no users)
+#
+# Overrides: SECRETS_DIR / KUBECONFIG env vars, or -e secrets_dir=… -e kubeconfig=…;
+# -e restart=false to skip rollout restarts; -e show_secrets=true to log values.
+- name: Cluster secrets and one-time setup
+  hosts: localhost
+  gather_facts: false
+  vars:
+    secrets_dir: "{{ lookup('env', 'SECRETS_DIR') or lookup('env', 'HOME') ~ '/backup/vishnefske-server/k8s-secrets' }}"
+    # Pinned so a stray kubectl context can't send this to another cluster.
+    kubeconfig: "{{ lookup('env', 'KUBECONFIG') or lookup('env', 'HOME') ~ '/.kube/homelab.yaml' }}"
+    ns: vishnefske
+    restart: true
+    show_secrets: false
+
+    env_lines: "{{ lookup('file', secrets_dir ~ '/secrets.env').splitlines() | reject('match', '^\\s*(#|$)') | list }}"
+    senv: "{{ dict(env_lines | map('regex_replace', '^([^=]*)=.*$', '\\1') | zip(env_lines | map('regex_replace', '^[^=]*=', ''))) }}"
+
+    # Secret key: secrets.env key (env), or file in secrets_dir (files).
+    # restarts: Deployments in `ns` to roll when the Secret changes.
+    secrets:
+      - name: cluster-vars # Flux postBuild substitution
+        namespace: flux-system
+        env:
+          SITE_HOST: SITE_HOST
+          LETSENCRYPT_EMAIL: LETSENCRYPT_EMAIL
+          POMODORO_OWNER_EMAIL: POMODORO_OWNER_EMAIL
+      - name: db-credentials
+        env:
+          POSTGRES_USER: POSTGRES_USER
+          POSTGRES_PASSWORD: POSTGRES_PASSWORD
+          KEYCLOAK_DB_NAME: KEYCLOAK_DB_NAME
+          KEYCLOAK_DB_USER: KEYCLOAK_DB_USER
+          KEYCLOAK_DB_PASSWORD: KEYCLOAK_DB_PASSWORD
+          GITEA_DB_NAME: GITEA_DB_NAME
+          GITEA_DB_USER: GITEA_DB_USER
+          GITEA_DB_PASSWORD: GITEA_DB_PASSWORD
+          GERRIT_DB_NAME: GERRIT_DB_NAME
+          GERRIT_DB_USER: GERRIT_DB_USER
+          GERRIT_DB_PASSWORD: GERRIT_DB_PASSWORD
+        restarts: [postgres, keycloak, gitea]
+      - name: keycloak
+        env:
+          KC_BOOTSTRAP_ADMIN_USERNAME: KC_BOOTSTRAP_ADMIN_USERNAME
+          KC_BOOTSTRAP_ADMIN_PASSWORD: KC_BOOTSTRAP_ADMIN_PASSWORD
+        restarts: [keycloak]
+      - name: keycloak-realm
+        if_file: vishnefske-realm.json
+        files: { vishnefske-realm.json: vishnefske-realm.json }
+        restarts: [keycloak]
+      - name: gitea
+        env:
+          GITEA__security__SECRET_KEY: GITEA_SECRET_KEY
+          GITEA__security__INTERNAL_TOKEN: GITEA_INTERNAL_TOKEN
+          GITEA__oauth2__JWT_SECRET: GITEA_JWT_SECRET
+        restarts: [gitea]
+      - name: gerrit
+        env: { OAUTH_CLIENT_SECRET: OIDC_GERRIT_SECRET }
+        restarts: [gerrit]
+      - name: nats-config
+        files: { nats-server.conf: nats-server.conf }
+        restarts: [nats]
+      - name: pomodoro
+        env: { SESSION_SECRET: POMODORO_SESSION_SECRET }
+        optional_env:
+          GOOGLE_CLIENT_ID: GOOGLE_CLIENT_ID
+          GOOGLE_CLIENT_SECRET: GOOGLE_CLIENT_SECRET
+        restarts: [pomodoro]
+
+    # Owned by `sudo edge-ca` on the Wyse: only verified here, never written.
+    external_secrets:
+      - { name: pubsub-tls, keys: [tls.crt, tls.key, ca.crt] }
+      - { name: pubsub-users, keys: [users.conf] }
+
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig }}"
+
+  tasks:
+    - name: Namespaces
+      kubernetes.core.k8s:
+        state: present
+        definition: { apiVersion: v1, kind: Namespace, metadata: { name: "{{ item }}" } }
+      loop: [flux-system, "{{ ns }}"]
+
+    - name: Secrets
+      ansible.builtin.include_tasks: tasks/secret.yml
+      loop: "{{ secrets }}"
+      loop_control: { label: "{{ item.name }}" }
+      when: item.if_file is not defined or (secrets_dir ~ '/' ~ item.if_file) is file
+
+    - name: Restart deployments whose Secrets changed
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: "{{ item }}", namespace: "{{ ns }}" }
+          spec:
+            template:
+              metadata:
+                annotations:
+                  kubectl.kubernetes.io/restartedAt: "{{ now(utc=true).isoformat() }}"
+      loop: "{{ restart_queue | default([]) | unique }}"
+      when: restart | bool
+
+    - name: Read edge-ca Secrets
+      kubernetes.core.k8s_info:
+        kind: Secret
+        namespace: "{{ ns }}"
+        name: "{{ item.name }}"
+      loop: "{{ external_secrets }}"
+      loop_control: { label: "{{ item.name }}" }
+      no_log: true # the result would include the private key
+      register: external
+
+    - name: edge-ca Secrets exist with their keys
+      ansible.builtin.assert:
+        that:
+          - item.resources | length == 1
+          - item.item['keys'] | difference(item.resources[0].data | default({}) | list) | length == 0
+        fail_msg: "{{ item.item.name }} missing or incomplete; run `sudo edge-ca` on the Wyse (see apps/vishnefske/PUBSUB.md)"
+        quiet: true
+      loop: "{{ external.results }}"
+      loop_control: { label: "{{ item.item.name }}" }
+
+    # Gitea -> Keycloak login. The source must be named `keycloak` to match
+    # the realm's redirect URI (/user/oauth2/keycloak/callback).
+    - name: Gitea login sources
+      ansible.builtin.command: >-
+        kubectl -n {{ ns }} exec deploy/gitea --
+        gitea admin auth list --config /data/custom/conf/app.ini
+      environment: { KUBECONFIG: "{{ kubeconfig }}" }
+      check_mode: false
+      changed_when: false
+      register: gitea_auth
+
+    - name: Gitea login source names
+      ansible.builtin.set_fact:
+        gitea_sources: "{{ gitea_auth.stdout_lines[1:] | map('regex_replace', '^\\S+\\s+(\\S+).*$', '\\1') | list }}"
+
+    - name: Gitea keycloak login source (would be added)
+      ansible.builtin.debug:
+        msg: gitea has no `keycloak` auth source
+      changed_when: true
+      when: ansible_check_mode and 'keycloak' not in gitea_sources
+
+    - name: Gitea keycloak login source
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - -n
+          - "{{ ns }}"
+          - exec
+          - deploy/gitea
+          - --
+          - gitea
+          - admin
+          - auth
+          - add-oauth
+          - --config=/data/custom/conf/app.ini
+          - --name=keycloak
+          - --provider=openidConnect
+          - --key=gitea
+          - --secret={{ senv.OIDC_GITEA_SECRET }}
+          - --auto-discover-url=https://auth.{{ senv.SITE_HOST }}/realms/vishnefske/.well-known/openid-configuration
+      environment: { KUBECONFIG: "{{ kubeconfig }}" }
+      no_log: "{{ not show_secrets | bool }}"
+      when: not ansible_check_mode and 'keycloak' not in gitea_sources

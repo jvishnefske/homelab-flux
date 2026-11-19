@@ -1,0 +1,7 @@
+# Everything talks to the Kubernetes API from this machine.
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+      # Needs the `kubernetes` Python package (apt: python3-kubernetes).
+      ansible_python_interpreter: "{{ ansible_playbook_python }}"
