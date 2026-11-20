@@ -74,10 +74,11 @@ ca other-ca
 leaf zenoh-ca server serverAuth DNS:localhost
 for cn in kd240-t1 tool-t1 rogue-t1; do leaf zenoh-ca $cn clientAuth; done
 leaf other-ca other-t1 clientAuth
-# The Secret's layout (zenohd-tls: ca, cert = full chain leaf first, key).
+# The Secret's layout as `edge-ca server --profile zenoh` writes it
+# (zenohd-tls: ca, cert = the leaf alone, the CA being the root; key).
 mkdir -p "$work/tls"
 cp "$c/zenoh-ca.crt" "$work/tls/ca"
-cat "$c/server.crt" "$c/zenoh-ca.crt" >"$work/tls/cert"
+cp "$c/server.crt" "$work/tls/cert"
 cp "$c/server.key" "$work/tls/key"
 
 # ---- config: a temp copy on loopback, with the test CNs -----------------
