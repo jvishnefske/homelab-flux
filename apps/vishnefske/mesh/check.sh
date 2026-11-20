@@ -21,23 +21,38 @@
 #   ./check.sh --acl V/bin/python  levels 2 and 3
 #
 # The live zenohd.json5 is never modified. KEEP=1 keeps the work dir
-# (certs, configs, zenohd logs); WORK=<dir> puts it there.
+# (certs, configs, zenohd logs); WORK=<dir> puts it there (absent or empty;
+# CONF=<file> checks another copy of zenohd.json5).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
+conf=${CONF:-$here/zenohd.json5}
 py=""
 if [[ ${1:-} == --acl ]]; then py=${2:?--acl needs a python with eclipse-zenoh}; fi
 zenohd=${ZENOHD:-$(command -v zenohd || true)}
 [[ -x $zenohd ]] || { echo "zenohd not found: set ZENOHD or put it on PATH" >&2; exit 2; }
 for t in openssl curl; do command -v $t >/dev/null || { echo "$t not found" >&2; exit 2; }; done
 
-work=${WORK:-$(mktemp -d)}
-mkdir -p "$work"
+# WORK must be absent or empty; on exit only what this script made goes.
+created=0
+if [[ -n ${WORK:-} ]]; then
+  work=$WORK
+  if [[ -e $work ]]; then
+    [[ -d $work && -z $(ls -A "$work") ]] || { echo "WORK=$work exists and is not an empty directory" >&2; exit 2; }
+  else
+    mkdir -p "$work"; created=1
+  fi
+else
+  work=$(mktemp -d); created=1
+fi
+chmod 700 "$work"
 pids=()
 cleanup() {
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
   wait 2>/dev/null || true
-  if [[ ${KEEP:-} == 1 ]]; then echo "kept $work"; else rm -rf "$work"; fi
+  if [[ ${KEEP:-} == 1 ]]; then echo "kept $work"
+  elif [[ $created == 1 ]]; then rm -rf "$work"
+  else find "$work" -mindepth 1 -delete; fi
 }
 trap cleanup EXIT
 
@@ -82,15 +97,22 @@ cp "$c/server.crt" "$work/tls/cert"
 cp "$c/server.key" "$work/tls/key"
 
 # ---- config: a temp copy on loopback, with the test CNs -----------------
+# The test CNs are added to each subject's list next to whatever is
+# enrolled, so this works on the live config at any time.
 TLS=17447 WS=18000
+for cn in kd240-t1 tool-t1 rogue-t1 other-t1; do
+  ! grep -q "\"$cn\"" "$conf" || { echo "test CN $cn is in zenohd.json5" >&2; exit 2; }
+done
 sed -e "s#/etc/mesh/tls#$work/tls#g" \
     -e "s#0.0.0.0:7447#127.0.0.1:$TLS#" \
     -e "s#0.0.0.0:8000#127.0.0.1:$WS#" \
-    -e 's#"kd240-unenrolled"#"kd240-t1"#' \
-    -e 's#"tool-unenrolled"#"tool-t1"#' \
-    "$here/zenohd.json5" >"$work/mesh.json5"
-grep -q kd240-t1 "$work/mesh.json5" && grep -q tool-t1 "$work/mesh.json5" \
-  || { echo "placeholder CNs not found in zenohd.json5" >&2; exit 2; }
+    -e 's#\(id: "kd240",.*cert_common_names: \[\)#\1 "kd240-t1",#' \
+    -e 's#\(id: "tool",.*cert_common_names: \[\)#\1 "tool-t1",#' \
+    "$conf" >"$work/mesh.json5"
+for cn in kd240-t1 tool-t1; do
+  [[ $(grep -c "\"$cn\"" "$work/mesh.json5") == 1 ]] \
+    || { echo "could not add $cn: zenohd.json5 needs 'id: \"<role>\", ... cert_common_names: [' on one line" >&2; exit 2; }
+done
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
