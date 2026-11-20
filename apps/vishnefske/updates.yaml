@@ -1,0 +1,200 @@
+# The updates channel (middleware design.md "Updates channel", UP…):
+# root-signed firmware and WASM payload releases that devices pull.
+#
+#   updates-zenohd  zenohd in router mode. ws/ 7448 is the clients' port,
+#                   reached only through Traefik at
+#                   https://updates.${SITE_HOST}/zenoh (TLS ends at Traefik);
+#                   tcp/ 7447 is for mw-updates alone. Every link
+#                   authenticates (usrpwd) and the ACL is default deny.
+#   mw-updates      the release store (2 Gi PVC). It holds only the root
+#                   PUBLIC key and refuses any publish the root did not sign.
+#
+# Both read the Secret updates-zenoh (ansible/cluster.yml):
+#   config.json5  `mw-updates router-config --server mw-updates
+#                  --publishers <u> --updaters <u,..> --dictionary
+#                  /etc/zenoh/auth/dictionary`
+#   dictionary    one `<user>:<password>` line per user
+#   credentials   mw-updates' own line of the dictionary
+#   ROOT_KEY      the root public key, hex (`mwctl key pub --pkcs11 mw-release`)
+#
+# Images are Nix-built in the middleware repo (image-zenohd,
+# image-mw-updates) and preloaded by the vishnefske.com NixOS config.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mw-updates-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 2Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: updates-zenohd
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: updates-zenohd }
+  template:
+    metadata:
+      labels: { app: updates-zenohd }
+    spec:
+      nodeSelector: { kubernetes.io/hostname: wyse }
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: zenohd
+          image: localhost/mw/zenohd
+          imagePullPolicy: Never
+          args: ["-c", "/etc/zenoh/config.json5"]
+          env:
+            - { name: RUST_LOG, value: info }
+          ports:
+            - { name: zenoh, containerPort: 7447 }
+            - { name: ws, containerPort: 7448 }
+          readinessProbe:
+            tcpSocket: { port: ws }
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: zenoh }
+            periodSeconds: 20
+          volumeMounts:
+            - { name: zenoh, mountPath: /etc/zenoh/config.json5, subPath: config.json5, readOnly: true }
+            - { name: dictionary, mountPath: /etc/zenoh/auth, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: zenoh
+          secret:
+            secretName: updates-zenoh
+            items: [{ key: config.json5, path: config.json5 }]
+        - name: dictionary
+          secret:
+            secretName: updates-zenoh
+            items: [{ key: dictionary, path: dictionary }]
+        - name: tmp
+          emptyDir: { sizeLimit: 16Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mw-updates
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: mw-updates }
+  template:
+    metadata:
+      labels: { app: mw-updates }
+    spec:
+      nodeSelector: { kubernetes.io/hostname: wyse }
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: mw-updates
+          image: localhost/mw/mw-updates
+          imagePullPolicy: Never
+          args: ["serve"]
+          env:
+            - { name: MW_UPDATES_DATA, value: /data }
+            - { name: MW_ZENOH_ROUTER, value: "tcp/updates-zenohd:7447" }
+            - { name: MW_ZENOH_CREDENTIALS, value: /etc/mw/credentials }
+            - name: MW_UPDATES_ROOT_KEY
+              valueFrom: { secretKeyRef: { name: updates-zenoh, key: ROOT_KEY } }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: credentials, mountPath: /etc/mw, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: mw-updates-data }
+        - name: credentials
+          secret:
+            secretName: updates-zenoh
+            items: [{ key: credentials, path: credentials }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: updates-zenohd
+spec:
+  selector: { app: updates-zenohd }
+  ports:
+    - { name: zenoh, port: 7447, targetPort: zenoh }
+    - { name: ws, port: 7448, targetPort: ws }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: updates
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["updates.${SITE_HOST}"]
+      secretName: updates-tls
+  rules:
+    - host: "updates.${SITE_HOST}"
+      http:
+        paths:
+          - path: /zenoh
+            pathType: Prefix
+            backend: { service: { name: updates-zenohd, port: { name: ws } } }
+---
+# The ws port only from Traefik (k3s runs it in kube-system); the tcp port
+# only from mw-updates. Kubelet probes come from the node and are allowed by
+# k3s's policy controller.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: updates-zenohd
+spec:
+  podSelector:
+    matchLabels: { app: updates-zenohd }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: traefik }
+      ports: [{ port: 7448, protocol: TCP }]
+    - from:
+        - podSelector:
+            matchLabels: { app: mw-updates }
+      ports: [{ port: 7447, protocol: TCP }]
+---
+# mw-updates listens on nothing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mw-updates
+spec:
+  podSelector:
+    matchLabels: { app: mw-updates }
+  policyTypes: [Ingress]
+  ingress: []
