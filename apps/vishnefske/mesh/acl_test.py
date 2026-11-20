@@ -2,7 +2,11 @@
 
 Sessions, each with its own cert: two devices (kd240-t1, node ids a1 and
 a2), a tool (tool-t1), a rogue (rogue-t1: valid CA, in no CN list) and a
-browser (ws, no cert). The devices are either clients of the mesh router
+browser (ws, no cert), plus `observer-t1`: a subject check.sh adds for
+the test alone, which may subscribe to and receive app/** and nothing
+else. A put that the ACL wrongly lets in therefore reaches the observer;
+without it, a denied put would have nobody permitted to receive it, and
+the case could not fail. The devices are either clients of the mesh router
 (--devices client) or clients of a second zenohd that links to it
 router-to-router with kd240-t1's cert (--devices router, the KD240's way).
 
@@ -40,28 +44,35 @@ def session(endpoint, certs=None, cn=None, ca=None):
     return zenoh.open(zenoh.Config.from_json5(json.dumps(conf)))
 
 
-# Device keys: (key, reply). "err:<text>" replies with an error.
-DEVICE_KEYS = [
-    ("sys/info", "info"),
-    ("sys/manifest", "manifest"),
-    ("sys/loader/begin", "begin"),
-    ("sys/fw/begin", "fw"),
-    ("sys/payload/status", "status"),
-    ("sys/trust/claim", "claimed"),
-    ("sys/payload/start", "err:Denied"),  # case 8: a device's error reply
-    ("sys/log", "log"),
+# What a tool and the browser may query, written out here (not read from
+# the config) so that a typo in a config key fails its case. The keys are
+# middleware's (mw-stack src/loader.rs, posix-node, mwctl).
+TOOL_KEYS = [
+    "sys/info", "sys/board", "sys/manifest", "sys/manifest/cm", "sys/peers", "sys/trust/info",
+    "sys/payload/status", "sys/payload/binding",
+    "sys/loader/begin", "sys/loader/chunk", "sys/loader/commit",
+    "sys/payload/start", "sys/payload/stop", "sys/payload/bind",
+    "sys/fw/begin", "sys/fw/chunk", "sys/fw/commit", "sys/fw/reboot", "sys/fw/confirm", "sys/fw/abort",
 ]
+WS_KEYS = [
+    "sys/info", "sys/manifest", "sys/manifest/cm",
+    "sys/loader/begin", "sys/loader/chunk", "sys/loader/commit",
+    "sys/payload/start", "sys/payload/stop", "sys/payload/bind",
+]
+NEVER_KEYS = ["sys/trust/claim", "sys/log"]
+ERR_KEY = "sys/payload/start"  # case 8: this one replies with an error
 
 
 def device(sess, node):
+    """Queryables on every key, bare and per-node, replying `<node>:<key>`."""
     qs = []
-    for key, reply in DEVICE_KEYS:
+    for key in TOOL_KEYS + NEVER_KEYS:
         for k in (key, f"@mw/node/{node}/{key}"):
-            def cb(q, k=k, reply=reply):
-                if reply.startswith("err:"):
-                    q.reply_err(f"{node}:{reply[4:]}")
+            def cb(q, k=k, key=key):
+                if key == ERR_KEY:
+                    q.reply_err(f"{node}:Denied")
                 else:
-                    q.reply(k, f"{node}:{reply}")
+                    q.reply(k, f"{node}:{key}")
             qs.append(sess.declare_queryable(k, cb))
     return qs
 
@@ -103,15 +114,16 @@ def main():
     tool = session(a.tls, a.certs, "tool-t1")
     rogue = session(a.tls, a.certs, "rogue-t1")
     ws = session(a.ws)
+    obs = session(a.tls, a.certs, "observer-t1")
     keep = device(d1, A1) + device(d2, A2)
 
     tool_state = Sink(tool, "app/proc/x/state")
-    tool_cmd = Sink(tool, "app/proc/x/cmd")
-    tool_unit = Sink(tool, "app/unit/x")
     rogue_state = Sink(rogue, "app/proc/x/state")
-    dev_unit = Sink(d1, "app/unit/x")
-    dev_cmd = Sink(d1, "app/proc/x/cmd")
     ws_state = Sink(ws, "app/proc/x/state")
+    # Exact keys, not app/**: behind a router, only subscriptions the ACL
+    # lets out to the KD240 (kd-subscribers) make it forward puts at all.
+    obs_keys = ["app/proc/x/state", "app/proc/x/cmd", "app/proc/x/program", "app/unit/x"]
+    obs_sinks = [Sink(obs, k) for k in obs_keys]
     time.sleep(1.5)  # declarations propagate
 
     results = []
@@ -126,15 +138,18 @@ def main():
     one_ok = lambda v: ([f"{A1}:{v}"], [])
 
     # 1. per-node query from the tool
-    check("1 tool @mw/node/a1/sys/info", ask(tool, f"@mw/node/{A1}/sys/info"), one_ok("info"))
+    check("1 tool @mw/node/a1/sys/info", ask(tool, f"@mw/node/{A1}/sys/info"), one_ok("sys/info"))
     check("1 tool bare sys/info (blueprint: denied)", ask(tool, "sys/info"), none)
     # 2. claim stays local
     check("2 tool sys/trust/claim", ask(tool, f"@mw/node/{A1}/sys/trust/claim"), none)
     # 3. wildcard over nodes
-    check("3 tool @mw/node/*/sys/info", ask(tool, "@mw/node/*/sys/info"), both_ok("info"))
+    check("3 tool @mw/node/*/sys/info", ask(tool, "@mw/node/*/sys/info"), both_ok("sys/info"))
     check("3 tool @mw/node/** (wide, not covered)", ask(tool, "@mw/node/**"), none)
     check("3 tool sys/log (not listed)", ask(tool, f"@mw/node/{A1}/sys/log"), none)
-    check("  tool fw/begin", ask(tool, f"@mw/node/{A1}/sys/fw/begin"), one_ok("fw"))
+    # every listed key, so a typo in the config fails here
+    for k in TOOL_KEYS:
+        want = ([], [f"{A1}:Denied"]) if k == ERR_KEY else one_ok(k)
+        check(f"  tool {k}", ask(tool, f"@mw/node/{A1}/{k}"), want)
     # 8. a device's error reply
     check("8 tool payload/start error reply", ask(tool, f"@mw/node/{A1}/sys/payload/start"),
           ([], [f"{A1}:Denied"]))
@@ -147,14 +162,15 @@ def main():
     rogue_q = rogue.declare_queryable(f"@mw/node/{'f' * 16}/sys/info",
                                       lambda q: q.reply(q.key_expr, "rogue"))
     time.sleep(0.5)
-    check("7 rogue queryable invisible to tool", ask(tool, "@mw/node/*/sys/info"), both_ok("info"))
+    check("7 rogue queryable invisible to tool", ask(tool, "@mw/node/*/sys/info"), both_ok("sys/info"))
     # 6. browser
-    check("6 ws sys/info", ask(ws, f"@mw/node/{A1}/sys/info"), one_ok("info"))
-    check("6 ws loader/begin", ask(ws, f"@mw/node/{A1}/sys/loader/begin"), one_ok("begin"))
-    check("6 ws fw/begin", ask(ws, f"@mw/node/{A1}/sys/fw/begin"), none)
-    check("6 ws payload/status", ask(ws, f"@mw/node/{A1}/sys/payload/status"), none)
-    check("6 ws payload/start error reply", ask(ws, f"@mw/node/{A1}/sys/payload/start"),
-          ([], [f"{A1}:Denied"]))
+    check("6 ws sys/info", ask(ws, f"@mw/node/{A1}/sys/info"), one_ok("sys/info"))
+    for k in WS_KEYS:
+        want = ([], [f"{A1}:Denied"]) if k == ERR_KEY else one_ok(k)
+        check(f"6 ws {k}", ask(ws, f"@mw/node/{A1}/{k}"), want)
+    for k in TOOL_KEYS + NEVER_KEYS:
+        if k not in WS_KEYS:
+            check(f"6 ws {k} (not listed)", ask(ws, f"@mw/node/{A1}/{k}"), none)
     check("6 ws bare sys/info", ask(ws, "sys/info"), none)
 
     # A prefix queryable, as the RT1050 firmware declares (@mw/node/<id>/sys/**):
@@ -171,30 +187,40 @@ def main():
     check("  ws fw/begin on a prefix queryable", ask(ws, f"@mw/node/{A3}/sys/fw/begin"), none)
     del pre
 
-    # 4/5. publications
-    d1.put("app/proc/x/state", "s1")
-    d1.put("app/proc/x/cmd", "c1")
-    d1.put("app/unit/x", "u1")
-    tool.put("app/unit/x", "u2")
-    tool.put("app/proc/x/cmd", "c2")
-    rogue.put("app/proc/x/cmd", "c3")
-    ws.put("app/proc/x/cmd", "c4")
-    ws.put("app/proc/x/state", "s4")
+    # 4/5. publications: (session, key, payload, allowed in?). Each denied
+    # put would reach the observer if the ACL let it in.
+    puts = [
+        (d1, "app/proc/x/state", "d-state", True),
+        (d1, "app/proc/x/cmd", "d-cmd", False),
+        (d1, "app/proc/x/program", "d-program", False),
+        (d1, "app/unit/x", "d-unit", False),
+        (tool, "app/proc/x/state", "t-state", False),
+        (tool, "app/proc/x/cmd", "t-cmd", False),
+        (tool, "app/proc/x/program", "t-program", False),
+        (tool, "app/unit/x", "t-unit", False),
+        (rogue, "app/proc/x/cmd", "r-cmd", False),
+        (rogue, "app/proc/x/state", "r-state", False),
+        (ws, "app/proc/x/cmd", "w-cmd", False),
+        (ws, "app/proc/x/state", "w-state", False),
+        (ws, "app/unit/x", "w-unit", False),
+    ]
+    for sess, key, payload, _ in puts:
+        sess.put(key, payload)
     time.sleep(1.0)
+    seen = {g for sink in obs_sinks for g in sink.got}
+    who = {id(d1): "device", id(tool): "tool", id(rogue): "rogue", id(ws): "ws"}
+    for sess, key, payload, allowed in puts:
+        check(f"{'5' if allowed else '4'} {who[id(sess)]} put {key} {'reaches' if allowed else 'stopped'}",
+              (key, payload) in seen, allowed)
     # A session's own puts reach its own subscribers inside the session, so
     # only the other sessions' payloads count.
     foreign = lambda sink, own: [g for g in sink.got if g[1] not in own]
-    check("5 tool receives device state", foreign(tool_state, {"s4"}), [("app/proc/x/state", "s1")])
-    check("5 tool does not receive device cmd", foreign(tool_cmd, {"c2"}), [])
-    check("4 tool does not receive device unit put", foreign(tool_unit, {"u2"}), [])
-    check("4 device does not receive tool unit put", foreign(dev_unit, {"u1"}), [])
-    check("  device does not receive cmd (tool, rogue, ws)", foreign(dev_cmd, {"c1"}), [])
-    check("7 rogue does not receive state", rogue_state.got, [])
-    check("6 ws does not receive device state", foreign(ws_state, {"s4"}), [])
-    check("6 ws put on state does not reach the tool", [g for g in tool_state.got if g[1] == "s4"], [])
+    check("5 tool receives device state", foreign(tool_state, {"t-state"}), [("app/proc/x/state", "d-state")])
+    check("7 rogue does not receive state", foreign(rogue_state, {"r-state"}), [])
+    check("6 ws does not receive state", foreign(ws_state, {"w-state"}), [])
 
     del keep, rogue_q
-    for s in (d1, d2, tool, rogue, ws):
+    for s in (d1, d2, tool, rogue, ws, obs):
         s.close()
     print(f"{results.count(True)}/{len(results)} cases as expected")
     return 0 if all(results) else 1

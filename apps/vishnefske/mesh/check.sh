@@ -62,7 +62,8 @@ fail() { echo "FAIL  $*"; fails=$((fails + 1)); }
 
 # ---- certificates -----------------------------------------------------
 # zenoh CA: server (SAN localhost, serverAuth), kd240-t1, tool-t1 and
-# rogue-t1 (valid, but in no CN list). other CA: other-t1.
+# rogue-t1 (valid, but in no CN list), observer-t1 (level 3 only).
+# other CA: other-t1.
 c=$work/certs
 mkdir -p "$c"
 ca() {
@@ -87,7 +88,7 @@ leaf() { # leaf <ca> <cn> <eku> [san]
 ca zenoh-ca
 ca other-ca
 leaf zenoh-ca server serverAuth DNS:localhost
-for cn in kd240-t1 tool-t1 rogue-t1; do leaf zenoh-ca $cn clientAuth; done
+for cn in kd240-t1 tool-t1 rogue-t1 observer-t1; do leaf zenoh-ca $cn clientAuth; done
 leaf other-ca other-t1 clientAuth
 # The Secret's layout as `edge-ca server --profile zenoh` writes it
 # (zenohd-tls: ca, cert = the leaf alone, the CA being the root; key).
@@ -100,7 +101,7 @@ cp "$c/server.key" "$work/tls/key"
 # The test CNs are added to each subject's list next to whatever is
 # enrolled, so this works on the live config at any time.
 TLS=17447 WS=18000
-for cn in kd240-t1 tool-t1 rogue-t1 other-t1; do
+for cn in kd240-t1 tool-t1 rogue-t1 observer-t1 other-t1; do
   ! grep -q "\"$cn\"" "$conf" || { echo "test CN $cn is in zenohd.json5" >&2; exit 2; }
 done
 sed -e "s#/etc/mesh/tls#$work/tls#g" \
@@ -113,6 +114,18 @@ for cn in kd240-t1 tool-t1; do
   [[ $(grep -c "\"$cn\"" "$work/mesh.json5") == 1 ]] \
     || { echo "could not add $cn: zenohd.json5 needs 'id: \"<role>\", ... cert_common_names: [' on one line" >&2; exit 2; }
 done
+if [[ -n $py ]]; then
+  # Level 3's observer (acl_test.py): a test-only subject that may subscribe
+  # to and receive app/** and nothing else, so that a put the ACL wrongly
+  # lets in is seen. It adds rights for observer-t1 alone.
+  sed -i \
+    -e 's#^    rules: \[$#&\n      { id: "test-observe-sub", permission: "allow", flows: ["ingress"], messages: ["declare_subscriber"], key_exprs: ["app/**"] },\n      { id: "test-observe-recv", permission: "allow", flows: ["egress"], messages: ["put"], key_exprs: ["app/**"] },#' \
+    -e 's#^    subjects: \[$#&\n      { id: "test-observer", link_protocols: ["tls"], cert_common_names: ["observer-t1"] },#' \
+    -e 's#^    policies: \[$#&\n      { id: "p-test-observer", subjects: ["test-observer"], rules: ["test-observe-sub", "test-observe-recv"] },#' \
+    "$work/mesh.json5"
+  [[ $(grep -c 'test-observe' "$work/mesh.json5") == 4 ]] \
+    || { echo "could not add the observer: zenohd.json5 needs 'rules: [', 'subjects: [', 'policies: [' alone on 4-space lines" >&2; exit 2; }
+fi
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
