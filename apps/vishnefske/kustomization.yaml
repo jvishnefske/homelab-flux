@@ -12,6 +12,7 @@ resources:
   - gerrit.yaml
   - nats.yaml
   - pubsub.yaml
+  - updates.yaml
 # Nix-built images, preloaded on the nodes (imagePullPolicy: Never).
 # newTag = git rev of the vishnefske.com repo; bumped by deploy-site.sh.
 images:
@@ -22,3 +23,7 @@ images:
   - { name: vishnefske/gitea, newTag: "8684979" }
   - { name: vishnefske/gerrit, newTag: "8684979" }
   - { name: vishnefske/nats, newTag: "8684979" }
+# Built in the middleware repo (image-zenohd, image-mw-updates; tag = its
+# git rev), preloaded by the same NixOS config.
+  - { name: localhost/mw/zenohd, newTag: "1892b89" }
+  - { name: localhost/mw/mw-updates, newTag: "1892b89" }

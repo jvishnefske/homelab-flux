@@ -7,6 +7,9 @@
 # Sources, from a private directory that is never committed:
 #   secrets.env            KEY=value lines (see the keys used below)
 #   nats-server.conf       NATS config (has the cluster route password)
+#   updates-zenohd.json5   the updates zenohd config (`mw-updates router-config`)
+#   updates-dictionary     its `<user>:<password>` lines, one per Zenoh user
+#   updates-server.cred    mw-updates' own line of that dictionary
 #   vishnefske-realm.json  Keycloak realm to import (optional, no users)
 #
 # Overrides: SECRETS_DIR / KUBECONFIG env vars, or -e secrets_dir=… -e kubeconfig=…;
@@ -69,6 +72,13 @@
       - name: nats-config
         files: { nats-server.conf: nats-server.conf }
         restarts: [nats]
+      - name: updates-zenoh
+        env: { ROOT_KEY: MW_UPDATES_ROOT_KEY }
+        files:
+          config.json5: updates-zenohd.json5
+          dictionary: updates-dictionary
+          credentials: updates-server.cred
+        restarts: [updates-zenohd, mw-updates]
       - name: pomodoro
         env: { SESSION_SECRET: POMODORO_SESSION_SECRET }
         optional_env:
