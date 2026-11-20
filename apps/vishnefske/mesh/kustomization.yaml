@@ -1,0 +1,9 @@
+# Self-contained: `kustomize build apps/vishnefske/mesh`. The parent
+# enables it with `- mesh` and supplies the namespace and the image tag.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - zenohd.yaml
+configMapGenerator:
+  - name: mesh-zenohd
+    files: [zenohd.json5]
