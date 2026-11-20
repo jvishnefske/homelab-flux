@@ -1,0 +1,32 @@
+# The browser's listener, NOT ENABLED (kustomization.yaml): enable when
+# the web client (W4c) is ready. wss://updates.${SITE_HOST}/mesh; Traefik
+# ends TLS and forwards plain ws to mesh-zenohd:8000, where the ACL's
+# `browser` subject (link protocol ws, no cert) is the only gate. /zenoh on
+# that host is the release channel's router (updates.yaml), and the cert
+# Secret updates-tls is its Ingress's, so this needs the updates work too.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: mesh-ws-limit
+spec:
+  rateLimit: { average: 20, burst: 40 }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mesh-ws
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: vishnefske-mesh-ws-limit@kubernetescrd
+    # No cert-manager annotation: the cert Secret updates-tls belongs to Ingress "updates".
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["updates.${SITE_HOST}"]
+      secretName: updates-tls
+  rules:
+    - host: "updates.${SITE_HOST}"
+      http:
+        paths:
+          - path: /mesh        # NOT /zenoh: that is the release channel (updates.yaml)
+            pathType: Prefix
+            backend: { service: { name: mesh-zenohd, port: { name: ws } } }
