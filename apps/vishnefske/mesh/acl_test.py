@@ -157,6 +157,20 @@ def main():
           ([], [f"{A1}:Denied"]))
     check("6 ws bare sys/info", ask(ws, "sys/info"), none)
 
+    # A prefix queryable, as the RT1050 firmware declares (@mw/node/<id>/sys/**):
+    # visible, and still only the listed keys reach it.
+    A3 = "00000000000000a3"
+    pre = d2.declare_queryable(f"@mw/node/{A3}/sys/**",
+                               lambda q: q.reply(q.key_expr, f"{A3}:{q.key_expr}"))
+    time.sleep(0.5)
+    check("  tool query on a prefix queryable", ask(tool, f"@mw/node/{A3}/sys/info"),
+          ([f"{A3}:@mw/node/{A3}/sys/info"], []))
+    check("  ws query on a prefix queryable", ask(ws, f"@mw/node/{A3}/sys/manifest"),
+          ([f"{A3}:@mw/node/{A3}/sys/manifest"], []))
+    check("  tool claim on a prefix queryable", ask(tool, f"@mw/node/{A3}/sys/trust/claim"), none)
+    check("  ws fw/begin on a prefix queryable", ask(ws, f"@mw/node/{A3}/sys/fw/begin"), none)
+    del pre
+
     # 4/5. publications
     d1.put("app/proc/x/state", "s1")
     d1.put("app/proc/x/cmd", "c1")
