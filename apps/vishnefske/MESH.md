@@ -82,8 +82,11 @@ Zenoh sees only the cert's **CN**. It ignores the OU, so the role is in
 the CN, and the ACL lists every CN:
 
 - **Enroll:** add the CN to the `kd240` or `tool` subject in
-  `mesh/zenohd.json5`, one per line, and replace the `*-unenrolled`
-  placeholder. The new ConfigMap hash rolls the pod.
+  `mesh/zenohd.json5`, one per line. The new ConfigMap hash rolls the pod.
+  The `*-UNENROLLED` placeholders may stay or go once a list has a real
+  CN. A list must never be empty, because zenohd refuses to start. The
+  placeholders grant nothing in practice, because edge-ca can't issue
+  them: ids are `[a-z0-9-]` only.
 - **Revoke:** remove the line. There is no CRL. A CA-valid cert whose CN is
   not listed still completes the TLS handshake, but every message is denied
   (verified, see below).

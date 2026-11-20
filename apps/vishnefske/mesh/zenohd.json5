@@ -68,12 +68,16 @@
         "@mw/node/*/sys/payload/start", "@mw/node/*/sys/payload/stop", "@mw/node/*/sys/payload/bind"] },
     ],
     subjects: [
-      // One CN per line so check.sh can sed them. CN lists must stay disjoint.
+      // One CN per line, `<role>-<id>` as `edge-ca issue --ou <role> <id>`
+      // makes it. CN lists must stay disjoint. Keep `id: "...", ...
+      // cert_common_names: [` on one line: check.sh adds its test CNs there.
+      // The *-UNENROLLED placeholders keep each list non-empty (zenohd needs
+      // that) and can never be issued: edge-ca ids are [a-z0-9-] only.
       { id: "kd240", link_protocols: ["tls"], cert_common_names: [
-        "kd240-unenrolled",
+        "kd240-UNENROLLED",
       ] },
       { id: "tool", link_protocols: ["tls"], cert_common_names: [
-        "tool-unenrolled",
+        "tool-UNENROLLED",
       ] },
       { id: "browser", link_protocols: ["ws"] },
     ],
