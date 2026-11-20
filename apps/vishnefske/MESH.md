@@ -181,16 +181,40 @@ The two levels:
   clients of the router, and once behind a second zenohd that links to it
   router-to-router with `kd240-t1`, the KD240's way.
 
-`KEEP=1` keeps the work directory, including `zenohd.log` with the ACL's
-decisions at trace level (`is unauthorized to`). That log also holds the
-per-key permission cache lines, so the count is not a count of dropped
-messages.
+The test CNs (`kd240-t1`, `tool-t1`) are added to each subject's list
+next to whatever is enrolled, and level 3 also adds the `observer-t1`
+subject. That needs `id: "<role>", ... cert_common_names: [` on one line,
+and `rules: [`, `subjects: [` and `policies: [` alone on their lines.
+
+Environment variables:
+- `CONF=<file>` checks another copy of `zenohd.json5`.
+- `WORK=<dir>` sets the work directory. It must be absent or empty, and
+  only what the script made is removed.
+- `KEEP=1` keeps the work directory, including `zenohd.log` with the
+  ACL's decisions at trace level (`is unauthorized to`). That log also
+  holds the per-key permission cache lines, so the count is not a count of
+  dropped messages.
 
 ### Findings (zenohd 1.10.1, eclipse-zenoh 1.10.1, 2026-11-20)
 
-All level 2 and 3 cases pass: 30 with the devices as clients, 29 behind a
-router. With `access_control.enabled: false`, 19 of 30 (18 of 29) cases
-fail, which shows that the cases test the ACL.
+All level 2 and 3 cases pass: 75 with the devices as clients, 74 behind a
+router. The cases cover every key in `tool-query` and `ws-query`
+positively, from a list written in the test, so a typo in a config key
+fails.
+
+Each put is checked against `observer-t1`, a subject that check.sh adds
+for the test alone and that may receive `app/**`. Without it, a denied put
+would have nobody permitted to receive it, and the case could never fail.
+
+Mutations (`CONF=` copies) fail as they should:
+- `deny-unit-writes` deleted and `kd-publish` widened to `app/**`: the
+  device's `cmd`, `program` and `unit` puts reach the observer in client
+  mode. Behind a router they still don't, because the cloud never lets
+  those subscriptions out to the KD240 (`kd-subscribers`), so its router
+  never forwards them. That is a second, real barrier.
+- A typo in a `tool-query` or `ws-query` key fails that key's case.
+- A copy with the placeholders replaced by real CNs passes, so the check
+  works on an enrolled config.
 
 1. **Handshakes.**
    - A listed CN completes TLS 1.3.
