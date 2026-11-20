@@ -118,13 +118,18 @@ and gets nothing.
 |---|---|---|
 | `kd240` | declare queryables on `@mw/node/*/sys/**`, be queried there and reply; put `app/proc/*/state`, `app/telemetry/**`; receive tools' subscriptions to those keys (`kd-subscribers`) | query anything; `app/unit/**` writes; `sys/trust/claim`; subscribe |
 | `tool` | query the per-node keys below; see queryables and replies; subscribe to and receive `app/proc/*/state`, `app/telemetry/**` | bare `sys/*`; `sys/trust/claim`; `sys/log` or any unlisted key; any put (`app/proc/*/cmd`, `/program`, `app/unit/**`) |
-| `browser` | query `sys/info`, `sys/manifest`, `sys/manifest/cm`, `sys/loader/{begin,chunk,commit}`, `sys/payload/{start,stop,bind}` (per node) | everything in `app/**`; `fw/*`; `payload/status`/`binding`; any put |
+| `browser` | probe only: query `sys/info`, `sys/manifest`, `sys/manifest/cm`, `sys/trust/info` (per node) | everything else: `loader/*`, `payload/*`, `fw/*`, `trust/claim`, `app/**`; any put |
 
 The tool keys (all `@mw/node/*/…`) are `sys/info`, `sys/board`,
 `sys/manifest`, `sys/manifest/cm`, `sys/peers`, `sys/trust/info`,
 `sys/payload/{status,binding,start,stop,bind}`,
 `sys/loader/{begin,chunk,commit}` and
 `sys/fw/{begin,chunk,commit,reboot,confirm,abort}`.
+
+The browser only probes and never signs; deploys go through mwctl with a
+tool cert. `sys/trust/info` is there for the autoprobe (W4c), which shows
+a device's trust state. It is read only and public: a public key and a
+counter, and posix-node answers it in every trust state.
 
 `sys/trust/claim` stays local to the board, and so do remote operator
 commands (`app/proc/*/cmd`, `/program`). `app/telemetry/**` is a
@@ -213,6 +218,8 @@ Mutations (`CONF=` copies) fail as they should:
   those subscriptions out to the KD240 (`kd-subscribers`), so its router
   never forwards them. That is a second, real barrier.
 - A typo in a `tool-query` or `ws-query` key fails that key's case.
+- `loader/begin` and `payload/start` put back into `ws-query`, with
+  `trust/info` taken out: the three matching ws cases fail in both modes.
 - A copy with the placeholders replaced by real CNs passes, so the check
   works on an enrolled config.
 
@@ -233,7 +240,8 @@ Mutations (`CONF=` copies) fail as they should:
 3. **Error replies (case 8): delivered.** A device's `reply_err` reaches
    the asker:
    - for a per-node query and for `@mw/node/*/…`;
-   - for a tool and for the browser;
+   - for a tool. The browser was also checked while it could still query
+     `payload/start`; it no longer can;
    - in both topologies.
 
    The reply rules (`kd-replies` ingress, `asker-see` egress) on the queried
@@ -271,19 +279,17 @@ Mutations (`CONF=` copies) fail as they should:
 
 ## Risks
 
-- **The ws listener is unauthenticated.** Anyone who reaches it can:
-  - read `sys/info` and the manifest;
-  - drive `loader/begin|chunk|commit`. Activation needs a signed commit,
-    but a stranger can take the transfer over, which denies legitimate
-    updates;
-  - send `sys/payload/start|stop|bind` to any node. The devices refuse
-    these unless signed, with a replay counter: the RT1050 (ZN5,
-    `zenoh_mgmt`) accepts only signed start/stop and a signed bind once
-    claimed, and nothing but `sys/info` and `sys/trust/info` before that;
-    posix-node (W4a) goes through mw-gateway's update gate with its
-    persisted control counter. So an unsigned call is refused. Only the
-    device's signature check stands in the way, though: the ACL lets the
-    request through.
+- **The ws listener is unauthenticated, so what it can read is public.**
+  Anyone who reaches it can read `sys/info`, the manifest, the manifest
+  pages (`sys/manifest/cm`) and `sys/trust/info` of any node on the mesh.
+  That reveals the node ids, the installed payloads, and each node's
+  trust state and public key.
+
+  Nothing else gets through: no loader, payload, firmware or claim key,
+  and no put. A ws peer therefore can't take over an upload with
+  `loader/begin`, and can't reach the devices' signed control path
+  (`payload/start|stop|bind`) at all. Deploys go through mwctl with a
+  tool cert.
 - **Session exhaustion.** `max_sessions: 128` is shared by the tls and ws
   listeners, so browser sessions can lock out devices and tools. `ws.yaml`
   allows 4 open WebSockets per client IP (Traefik `inFlightReq`) plus a
@@ -291,7 +297,7 @@ Mutations (`CONF=` copies) fail as they should:
   limit only sees real client IPs if Traefik's Service keeps them
   (`externalTrafficPolicy: Local`).
 
-  Both risks are why ws ships disabled.
+  This is one reason ws ships disabled.
 - **A CN cannot be bound to a zid16.** A valid `kd240` cert can declare
   another node's keys. Closing that needs per-device rules.
 - **There is no revocation besides the CN list.**

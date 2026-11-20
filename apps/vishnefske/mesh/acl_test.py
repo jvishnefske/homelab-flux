@@ -54,11 +54,8 @@ TOOL_KEYS = [
     "sys/payload/start", "sys/payload/stop", "sys/payload/bind",
     "sys/fw/begin", "sys/fw/chunk", "sys/fw/commit", "sys/fw/reboot", "sys/fw/confirm", "sys/fw/abort",
 ]
-WS_KEYS = [
-    "sys/info", "sys/manifest", "sys/manifest/cm",
-    "sys/loader/begin", "sys/loader/chunk", "sys/loader/commit",
-    "sys/payload/start", "sys/payload/stop", "sys/payload/bind",
-]
+# The browser only probes: loader/* and payload/* are in its negative cases.
+WS_KEYS = ["sys/info", "sys/manifest", "sys/manifest/cm", "sys/trust/info"]
 NEVER_KEYS = ["sys/trust/claim", "sys/log"]
 ERR_KEY = "sys/payload/start"  # case 8: this one replies with an error
 

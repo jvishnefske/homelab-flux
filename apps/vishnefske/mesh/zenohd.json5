@@ -63,9 +63,10 @@
         key_exprs: ["app/proc/*/state", "app/telemetry/**"] },
       // ---- browser (ws) ----
       { id: "ws-query", permission: "allow", flows: ["ingress"], messages: ["query"], key_exprs: [
+        // The browser only probes (read only, public); it never signs, and
+        // deploys go through mwctl, so no loader/* or payload/* here.
         "@mw/node/*/sys/info", "@mw/node/*/sys/manifest", "@mw/node/*/sys/manifest/cm",
-        "@mw/node/*/sys/loader/begin", "@mw/node/*/sys/loader/chunk", "@mw/node/*/sys/loader/commit",
-        "@mw/node/*/sys/payload/start", "@mw/node/*/sys/payload/stop", "@mw/node/*/sys/payload/bind"] },
+        "@mw/node/*/sys/trust/info"] },
     ],
     subjects: [
       // One CN per line, `<role>-<id>` as `edge-ca issue --ou <role> <id>`
