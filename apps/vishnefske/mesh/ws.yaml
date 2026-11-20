@@ -11,12 +11,28 @@ metadata:
 spec:
   rateLimit: { average: 20, burst: 40 }
 ---
+# At most 4 open ws sessions per client IP. A WebSocket stays an in-flight
+# request for as long as it is open, and zenohd's max_sessions (128) is
+# shared with the devices' tls listener, so idle browser sessions could
+# otherwise lock the devices out. depth 0 means the connection's address,
+# not X-Forwarded-For (which a client could set); that is the real client
+# only if Traefik's Service keeps source IPs (externalTrafficPolicy: Local).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: mesh-ws-inflight
+spec:
+  inFlightReq:
+    amount: 4
+    sourceCriterion:
+      ipStrategy: { depth: 0 }
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: mesh-ws
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: vishnefske-mesh-ws-limit@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: vishnefske-mesh-ws-inflight@kubernetescrd,vishnefske-mesh-ws-limit@kubernetescrd
     # No cert-manager annotation: the cert Secret updates-tls belongs to Ingress "updates".
 spec:
   ingressClassName: traefik

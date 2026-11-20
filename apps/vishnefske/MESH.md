@@ -247,11 +247,27 @@ fail, which shows that the cases test the ACL.
 
 ## Risks
 
-- **The ws listener is unauthenticated.** Anyone can read `sys/info` and
-  the manifest, and can drive `loader/begin|chunk|commit`. Activation needs
-  a signed commit, but a stranger can take the transfer over, which denies
-  legitimate updates. That is why ws ships disabled, behind a Traefik
-  rateLimit.
+- **The ws listener is unauthenticated.** Anyone who reaches it can:
+  - read `sys/info` and the manifest;
+  - drive `loader/begin|chunk|commit`. Activation needs a signed commit,
+    but a stranger can take the transfer over, which denies legitimate
+    updates;
+  - send `sys/payload/start|stop|bind` to any node. The devices refuse
+    these unless signed, with a replay counter: the RT1050 (ZN5,
+    `zenoh_mgmt`) accepts only signed start/stop and a signed bind once
+    claimed, and nothing but `sys/info` and `sys/trust/info` before that;
+    posix-node (W4a) goes through mw-gateway's update gate with its
+    persisted control counter. So an unsigned call is refused. Only the
+    device's signature check stands in the way, though: the ACL lets the
+    request through.
+- **Session exhaustion.** `max_sessions: 128` is shared by the tls and ws
+  listeners, so browser sessions can lock out devices and tools. `ws.yaml`
+  allows 4 open WebSockets per client IP (Traefik `inFlightReq`) plus a
+  rateLimit. Many source IPs can still fill the table, and the per-IP
+  limit only sees real client IPs if Traefik's Service keeps them
+  (`externalTrafficPolicy: Local`).
+
+  Both risks are why ws ships disabled.
 - **A CN cannot be bound to a zid16.** A valid `kd240` cert can declare
   another node's keys. Closing that needs per-device rules.
 - **There is no revocation besides the CN list.**
