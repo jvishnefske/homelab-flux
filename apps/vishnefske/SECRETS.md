@@ -29,6 +29,7 @@ unless `-e show_secrets=true`. Needs `kubernetes.core` (ships with the
 | `gerrit` | vishnefske | `OAUTH_CLIENT_SECRET` (Keycloak client `gerrit`) | gerrit |
 | `nats-config` | vishnefske | `nats-server.conf` | nats |
 | `pomodoro` | vishnefske | `SESSION_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | pomodoro (Google keys optional until set) |
+| `zenohd-tls` | vishnefske | `ca` (Zenoh CA), `cert`, `key`; owned by `sudo edge-ca server mesh.updates.<SITE_HOST> --profile zenoh` on the Wyse, not this playbook | mesh-zenohd ([MESH.md](MESH.md)) |
 
 ## One-time setup after the first start
 

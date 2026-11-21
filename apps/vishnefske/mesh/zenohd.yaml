@@ -1,0 +1,98 @@
+# The mesh router (MESH.md): zenohd for the lathes' KD240s, operator tools
+# and (ws.yaml, later) the browser. Reachable from the internet at
+# tls/mesh.updates.${SITE_HOST}:443, mutual TLS only: Traefik passes the
+# TLS stream through by SNI and zenohd verifies the client cert against the
+# Zenoh CA (`edge-ca init-zenoh` on the Wyse; not the NATS CA). Its ACL
+# (zenohd.json5) maps the cert's CN to a role.
+#
+# Secret (managed by `sudo edge-ca` on the Wyse, not by Flux):
+#   zenohd-tls  ca (Zenoh CA), cert (server, full chain), key
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mesh-zenohd
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: mesh-zenohd }
+  template:
+    metadata:
+      labels: { app: mesh-zenohd }
+    spec:
+      nodeSelector: { kubernetes.io/hostname: wyse }
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: zenohd
+          image: localhost/mw/zenohd
+          imagePullPolicy: Never
+          args: ["-c", "/etc/mesh/conf/zenohd.json5"]
+          env: [{ name: RUST_LOG, value: info }]
+          ports:
+            - { name: tls, containerPort: 7447 }
+            - { name: ws, containerPort: 8000 }
+          readinessProbe: { tcpSocket: { port: ws }, periodSeconds: 10 }
+          livenessProbe: { tcpSocket: { port: ws }, periodSeconds: 20, failureThreshold: 6 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/mesh/conf, readOnly: true }
+            - { name: tls, mountPath: /etc/mesh/tls, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: config
+          configMap: { name: mesh-zenohd }      # hashed by the generator
+        - name: tls
+          secret: { secretName: zenohd-tls, defaultMode: 0440 }   # ca, cert, key (edge-ca)
+        - name: tmp
+          emptyDir: { sizeLimit: 16Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mesh-zenohd
+spec:
+  selector: { app: mesh-zenohd }
+  ports:
+    - { name: tls, port: 7447, targetPort: tls }
+    - { name: ws, port: 8000, targetPort: ws }
+---
+# Router stays inert until DNS exists; SNI passthrough, zenohd verifies client certs.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteTCP
+metadata:
+  name: mesh-zenohd
+spec:
+  entryPoints: [websecure]
+  routes:
+    - match: HostSNI(`mesh.updates.${SITE_HOST}`)
+      services: [{ name: mesh-zenohd, port: 7447 }]
+  tls:
+    passthrough: true
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mesh-zenohd
+spec:
+  podSelector:
+    matchLabels: { app: mesh-zenohd }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: traefik }
+      ports: [{ port: 7447, protocol: TCP }, { port: 8000, protocol: TCP }]

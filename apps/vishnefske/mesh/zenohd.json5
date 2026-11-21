@@ -1,0 +1,95 @@
+// Mesh router: mTLS for devices and tools, plain ws for the browser (TLS ends at Traefik).
+{
+  mode: "router",
+  listen: { endpoints: ["tls/0.0.0.0:7447", "ws/0.0.0.0:8000"] },
+  scouting: { multicast: { enabled: false }, gossip: { enabled: false } },
+  plugins_loading: { enabled: false },
+  transport: {
+    unicast: { max_sessions: 128, accept_pending: 32, accept_timeout: 5000 },
+    link: {
+      // tls block applies to tls/ links only; ws/ ignores it.
+      tls: {
+        root_ca_certificate: "/etc/mesh/tls/ca",
+        listen_certificate: "/etc/mesh/tls/cert",
+        listen_private_key: "/etc/mesh/tls/key",
+        enable_mtls: true,
+        close_link_on_expiration: true,
+      },
+    },
+  },
+  access_control: {
+    enabled: true,
+    default_permission: "deny",
+    rules: [
+      // ---- denies (win inside a subject) ----
+      { id: "deny-unit-writes", permission: "deny", flows: ["ingress", "egress"],
+        messages: ["put", "delete"], key_exprs: ["app/unit/**"] },
+      { id: "deny-claim", permission: "deny", flows: ["ingress", "egress"],
+        messages: ["query", "put"], key_exprs: ["@mw/node/*/sys/trust/claim"] },
+      { id: "deny-ws-app", permission: "deny", flows: ["ingress", "egress"],
+        messages: ["put", "delete", "query", "reply", "declare_subscriber", "declare_queryable",
+                   "liveliness_token", "declare_liveliness_subscriber", "liveliness_query"],
+        key_exprs: ["app/**"] },
+      // ---- kd240 devices ----
+      { id: "kd-announce", permission: "allow", flows: ["ingress"], messages: ["declare_queryable"],
+        key_exprs: ["@mw/node/*/sys/**"] },
+      { id: "kd-queries-in", permission: "allow", flows: ["egress"], messages: ["query"],
+        key_exprs: ["@mw/node/*/sys/**"] },
+      { id: "kd-replies", permission: "allow", flows: ["ingress"], messages: ["reply"],
+        key_exprs: ["@mw/node/*/sys/**"] },
+      // "app/telemetry/**" is a placeholder: no telemetry key exists in the lathe code yet.
+      { id: "kd-publish", permission: "allow", flows: ["ingress"], messages: ["put"],
+        key_exprs: ["app/proc/*/state", "app/telemetry/**"] },
+      // A KD240 links router-to-router: its router forwards a put only to
+      // subscribers it has been told about, so the tools' subscriptions
+      // must reach it (check.sh --acl, devices behind a router).
+      { id: "kd-subscribers", permission: "allow", flows: ["egress"], messages: ["declare_subscriber"],
+        key_exprs: ["app/proc/*/state", "app/telemetry/**"] },
+      // ---- tools ----
+      { id: "tool-query", permission: "allow", flows: ["ingress"], messages: ["query"], key_exprs: [
+        "@mw/node/*/sys/info", "@mw/node/*/sys/board", "@mw/node/*/sys/manifest",
+        "@mw/node/*/sys/manifest/cm", "@mw/node/*/sys/peers", "@mw/node/*/sys/trust/info",
+        "@mw/node/*/sys/payload/status", "@mw/node/*/sys/payload/binding",
+        "@mw/node/*/sys/loader/begin", "@mw/node/*/sys/loader/chunk", "@mw/node/*/sys/loader/commit",
+        "@mw/node/*/sys/payload/start", "@mw/node/*/sys/payload/stop", "@mw/node/*/sys/payload/bind",
+        "@mw/node/*/sys/fw/begin", "@mw/node/*/sys/fw/chunk", "@mw/node/*/sys/fw/commit",
+        "@mw/node/*/sys/fw/reboot", "@mw/node/*/sys/fw/confirm", "@mw/node/*/sys/fw/abort"] },
+      // What the asker may see: queryable declarations and replies (visibility only).
+      { id: "asker-see", permission: "allow", flows: ["egress"],
+        messages: ["declare_queryable", "reply"], key_exprs: ["@mw/node/*/sys/**"] },
+      { id: "tool-subscribe", permission: "allow", flows: ["ingress"], messages: ["declare_subscriber"],
+        key_exprs: ["app/proc/*/state", "app/telemetry/**"] },
+      { id: "tool-receive", permission: "allow", flows: ["egress"], messages: ["put"],
+        key_exprs: ["app/proc/*/state", "app/telemetry/**"] },
+      // ---- browser (ws) ----
+      { id: "ws-query", permission: "allow", flows: ["ingress"], messages: ["query"], key_exprs: [
+        // The browser only probes (read only, public); it never signs, and
+        // deploys go through mwctl, so no loader/* or payload/* here.
+        "@mw/node/*/sys/info", "@mw/node/*/sys/manifest", "@mw/node/*/sys/manifest/cm",
+        "@mw/node/*/sys/trust/info"] },
+    ],
+    subjects: [
+      // One CN per line, `<role>-<id>` as `edge-ca issue --ou <role> <id>`
+      // makes it. CN lists must stay disjoint. Keep `id: "...", ...
+      // cert_common_names: [` on one line: check.sh adds its test CNs there.
+      // The *-UNENROLLED placeholders keep each list non-empty (zenohd needs
+      // that) and can never be issued: edge-ca ids are [a-z0-9-] only.
+      { id: "kd240", link_protocols: ["tls"], cert_common_names: [
+        "kd240-UNENROLLED",
+      ] },
+      { id: "tool", link_protocols: ["tls"], cert_common_names: [
+        "tool-UNENROLLED",
+      ] },
+      { id: "browser", link_protocols: ["ws"] },
+    ],
+    policies: [
+      { id: "p-kd240", subjects: ["kd240"],
+        rules: ["kd-announce", "kd-queries-in", "kd-replies", "kd-publish", "kd-subscribers",
+                "deny-unit-writes", "deny-claim"] },
+      { id: "p-tool", subjects: ["tool"],
+        rules: ["tool-query", "asker-see", "tool-subscribe", "tool-receive", "deny-unit-writes", "deny-claim"] },
+      { id: "p-browser", subjects: ["browser"],
+        rules: ["ws-query", "asker-see", "deny-unit-writes", "deny-claim", "deny-ws-app"] },
+    ],
+  },
+}
