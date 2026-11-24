@@ -1,0 +1,95 @@
+# Middleware admin console (admin.${SITE_HOST}): owner-only login through
+# Keycloak (client `admin`), NATS channel metrics, mTLS certificate requests
+# that the Wyse signer fulfils, and /metrics for Prometheus. Source:
+# vishnefske.com/admin. Holds no CA key: signing happens on the Wyse.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: admin-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 100Mi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: admin }
+  template:
+    metadata:
+      labels: { app: admin }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: admin
+          image: vishnefske/admin
+          imagePullPolicy: Never
+          env:
+            - { name: PUBLIC_URL, value: "https://admin.${SITE_HOST}" }
+            - { name: OWNER_EMAIL, value: "${POMODORO_OWNER_EMAIL}" }
+            - { name: KEYCLOAK_URL, value: "https://auth.${SITE_HOST}" }
+            - { name: KEYCLOAK_REALM, value: vishnefske }
+            - { name: OIDC_CLIENT_ID, value: admin }
+            - { name: NATS_MONITOR_URL, value: "http://pubsub:8222" }
+            - { name: GRAFANA_URL, value: "https://grafana.${SITE_HOST}" }
+            - { name: GRAFANA_DASHBOARD, value: pubsub }
+            - { name: DATA_DIR, value: /data }
+            - name: SESSION_SECRET
+              valueFrom: { secretKeyRef: { name: admin, key: SESSION_SECRET } }
+            - name: OIDC_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: admin, key: OIDC_CLIENT_SECRET } }
+            - name: SIGNER_TOKEN
+              valueFrom: { secretKeyRef: { name: admin, key: SIGNER_TOKEN } }
+            - name: METRICS_TOKEN
+              valueFrom: { secretKeyRef: { name: admin, key: METRICS_TOKEN } }
+          ports: [{ name: http, containerPort: 8080 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: admin-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin
+spec:
+  selector: { app: admin }
+  ports: [{ name: http, port: 80, targetPort: http }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: admin
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["admin.${SITE_HOST}"]
+      secretName: admin-tls
+  rules:
+    - host: "admin.${SITE_HOST}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: admin, port: { name: http } } }

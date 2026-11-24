@@ -70,11 +70,25 @@
         files: { nats-server.conf: nats-server.conf }
         restarts: [nats]
       - name: pomodoro
-        env: { SESSION_SECRET: POMODORO_SESSION_SECRET }
-        optional_env:
-          GOOGLE_CLIENT_ID: GOOGLE_CLIENT_ID
-          GOOGLE_CLIENT_SECRET: GOOGLE_CLIENT_SECRET
+        env:
+          SESSION_SECRET: POMODORO_SESSION_SECRET
+          OIDC_CLIENT_SECRET: OIDC_POMODORO_SECRET
         restarts: [pomodoro]
+      - name: admin
+        env:
+          SESSION_SECRET: ADMIN_SESSION_SECRET
+          OIDC_CLIENT_SECRET: OIDC_ADMIN_SECRET
+          SIGNER_TOKEN: ADMIN_SIGNER_TOKEN
+          METRICS_TOKEN: ADMIN_METRICS_TOKEN
+        restarts: [admin]
+      - name: grafana
+        env:
+          GF_SECURITY_ADMIN_PASSWORD: GRAFANA_ADMIN_PASSWORD
+          GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET: OIDC_GRAFANA_SECRET
+        restarts: [grafana]
+      - name: prometheus-scrape
+        env: { token: ADMIN_METRICS_TOKEN }
+        restarts: [prometheus]
 
     # Owned by `sudo edge-ca` on the Wyse: only verified here, never written.
     external_secrets:
