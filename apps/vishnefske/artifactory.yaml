@@ -6,9 +6,11 @@
 #   `artifactory` Secret once (random admin password, master/join keys, DB
 #   password) and never overwrites it. View the admin password with
 #   `just artifactory-password`.
-# - Database: the shared PostgreSQL. The same Job creates the `artifactory`
-#   role and database through `kubectl exec deploy/postgres` (idempotent). If
-#   postgres's volume is ever wiped, rerun it: `just artifactory-db`.
+# - Database: the shared PostgreSQL. The same Job then connects to it over the
+#   Service as the superuser (from db-credentials) and creates the
+#   `artifactory` role and database (idempotent). If postgres's volume is ever
+#   wiped, rerun it: `just artifactory-db`. The Job's ServiceAccount can only
+#   read and create Secrets: no exec, no pod access.
 # - Admin login: the chart writes bootstrap.creds from the Secret, so the
 #   default admin/password never exists on the public URL. Access applies it on
 #   start, so the Secret stays the source of truth for the admin password.
@@ -35,16 +37,6 @@ rules:
   - apiGroups: [""]
     resources: [secrets]
     verbs: [create]
-  - apiGroups: [apps]
-    resources: [deployments]
-    resourceNames: [postgres]
-    verbs: [get]
-  - apiGroups: [""]
-    resources: [pods]
-    verbs: [get, list]
-  - apiGroups: [""]
-    resources: [pods/exec]
-    verbs: [create]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -61,36 +53,36 @@ metadata:
     # Shell variables below, not Flux ${VARS}.
     kustomize.toolkit.fluxcd.io/substitute: disabled
 data:
-  init.sh: |
+  # initContainer: create the Secret once, never overwrite it.
+  secret.sh: |
     set -euo pipefail
-    ns=vishnefske
-    if ! kubectl -n "$ns" get secret artifactory >/dev/null 2>&1; then
-      echo "creating Secret artifactory"
-      pw=$(openssl rand -hex 16)
-      dbpw=$(openssl rand -hex 24)
-      kubectl -n "$ns" create secret generic artifactory \
-        --from-literal=master-key="$(openssl rand -hex 32)" \
-        --from-literal=join-key="$(openssl rand -hex 16)" \
-        --from-literal=admin-password="$pw" \
-        --from-literal=bootstrap-creds="admin@*=$pw" \
-        --from-literal=db-user=artifactory \
-        --from-literal=db-password="$dbpw" \
-        --from-literal=db-url=jdbc:postgresql://postgres:5432/artifactory
+    if kubectl get secret artifactory >/dev/null 2>&1; then
+      echo "Secret artifactory exists"; exit 0
     fi
-    dbpw=$(kubectl -n "$ns" get secret artifactory -o jsonpath='{.data.db-password}' | base64 -d)
-    kubectl -n "$ns" rollout status deploy/postgres --timeout=10m
-    # Hex password, so it's safe inside the quoted \set; it goes in on stdin,
-    # not argv. Same reconcile as postgres's own entrypoint.
-    kubectl -n "$ns" exec -i deploy/postgres -- sh -c \
-      'psql -q -v ON_ERROR_STOP=1 -h /tmp -U "$POSTGRES_USER" -d postgres' <<SQL
-    \set pw '$dbpw'
+    pw=$(openssl rand -hex 16)
+    kubectl create secret generic artifactory \
+      --from-literal=master-key="$(openssl rand -hex 32)" \
+      --from-literal=join-key="$(openssl rand -hex 16)" \
+      --from-literal=admin-password="$pw" \
+      --from-literal=bootstrap-creds="admin@*=$pw" \
+      --from-literal=db-user=artifactory \
+      --from-literal=db-password="$(openssl rand -hex 24)" \
+      --from-literal=db-url=jdbc:postgresql://postgres:5432/artifactory
+    echo "created Secret artifactory"
+  # Same reconcile as postgres's own entrypoint; the password is read with
+  # \getenv, so it never appears in SQL text or argv.
+  db.sh: |
+    set -eu
+    until pg_isready -q; do echo "waiting for postgres"; sleep 5; done
+    psql -q -v ON_ERROR_STOP=1 -d postgres <<'SQL'
+    \getenv pw DB_PASSWORD
     SELECT 'CREATE ROLE artifactory LOGIN'
       WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'artifactory')\gexec
     SELECT format('ALTER ROLE artifactory WITH LOGIN PASSWORD %L', :'pw')\gexec
     SELECT 'CREATE DATABASE artifactory OWNER artifactory'
       WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'artifactory')\gexec
     SQL
-    echo "artifactory Secret and database ready"
+    echo "database artifactory ready"
 ---
 apiVersion: batch/v1
 kind: Job
@@ -110,23 +102,40 @@ spec:
         runAsUser: 65534
         runAsGroup: 65534
         seccompProfile: { type: RuntimeDefault }
-      containers:
-        - name: init
-          image: docker.io/alpine/k8s:1.35.10
+      initContainers:
+        - name: secret
+          image: docker.io/alpine/k8s:1.35.10@sha256:6b9b607247ab8f0d0bd2d6173a0b842b4d173c652475c9a715eec0c7ef27eac5
           imagePullPolicy: IfNotPresent
-          command: [bash, /scripts/init.sh]
+          command: [bash, /scripts/secret.sh]
           env:
             - { name: HOME, value: /tmp }
-          volumeMounts:
+          volumeMounts: &mounts
             - { name: scripts, mountPath: /scripts, readOnly: true }
             - { name: tmp, mountPath: /tmp }
-          securityContext:
+          securityContext: &csc
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
-          resources:
+          resources: &res
             requests: { cpu: 10m, memory: 32Mi }
             limits: { memory: 128Mi }
+      containers:
+        - name: db
+          image: docker.io/library/postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
+          imagePullPolicy: IfNotPresent
+          command: [sh, /scripts/db.sh]
+          env:
+            - { name: HOME, value: /tmp }
+            - { name: PGHOST, value: postgres }
+            - name: PGUSER
+              valueFrom: { secretKeyRef: { name: db-credentials, key: POSTGRES_USER } }
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: db-credentials, key: POSTGRES_PASSWORD } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: artifactory, key: db-password } }
+          volumeMounts: *mounts
+          securityContext: *csc
+          resources: *res
       volumes:
         - name: scripts
           configMap: { name: artifactory-secrets }
