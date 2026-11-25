@@ -54,8 +54,13 @@ spec:
           ports: [{ name: http, containerPort: 8080 }]
           readinessProbe:
             httpGet: { path: /healthz, port: http }
+          # Board enrolment (POST /api/enroll) stays off (503) until MW_PKI_BIN,
+          # MW_PKI_KEY and MW_PKI_CA are set and the pod can reach the TPM's
+          # PKCS#11 token; see vishnefske.com/admin/README.md, "Enrolment".
           volumeMounts:
             - { name: data, mountPath: /data }
+            # mw-pki's CSR and certificate pass through a private temp dir.
+            - { name: tmp, mountPath: /tmp }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -66,6 +71,8 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: admin-data }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }
 ---
 apiVersion: v1
 kind: Service
