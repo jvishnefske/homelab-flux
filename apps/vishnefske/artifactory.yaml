@@ -1,0 +1,203 @@
+# JFrog Container Registry (Artifactory JCR) at hub.${SITE_HOST}: Docker, Helm
+# and generic repositories. Upstream chart and images (pulled from
+# releases-docker.jfrog.io / Docker Hub on first use).
+#
+# - Secrets: no secrets.env. The artifactory-secrets Job below generates the
+#   `artifactory` Secret once (random admin password, master/join keys, DB
+#   password) and never overwrites it. View the admin password with
+#   `just artifactory-password`.
+# - Database: the shared PostgreSQL. The same Job creates the `artifactory`
+#   role and database through `kubectl exec deploy/postgres` (idempotent). If
+#   postgres's volume is ever wiped, rerun it: `just artifactory-db`.
+# - Admin login: the chart writes bootstrap.creds from the Secret, so the
+#   default admin/password never exists on the public URL. Access applies it on
+#   start, so the Secret stays the source of truth for the admin password.
+# - No chart nginx: Traefik terminates TLS and routes / to the router (8082)
+#   and /artifactory/ to Tomcat (8081). Docker uses the repository-path method:
+#   docker login hub.${SITE_HOST}; docker pull hub.${SITE_HOST}/<repo>/<image>.
+# - First start: log in as admin and set the Base URL to
+#   https://hub.${SITE_HOST} (Administration -> General -> Settings).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: artifactory-secrets
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: artifactory-secrets
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [artifactory]
+    verbs: [get]
+  # create can't be limited by name; the script only ever creates `artifactory`.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [postgres]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: artifactory-secrets
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: artifactory-secrets }
+subjects: [{ kind: ServiceAccount, name: artifactory-secrets }]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: artifactory-secrets
+  annotations:
+    # Shell variables below, not Flux ${VARS}.
+    kustomize.toolkit.fluxcd.io/substitute: disabled
+data:
+  init.sh: |
+    set -euo pipefail
+    ns=vishnefske
+    if ! kubectl -n "$ns" get secret artifactory >/dev/null 2>&1; then
+      echo "creating Secret artifactory"
+      pw=$(openssl rand -hex 16)
+      dbpw=$(openssl rand -hex 24)
+      kubectl -n "$ns" create secret generic artifactory \
+        --from-literal=master-key="$(openssl rand -hex 32)" \
+        --from-literal=join-key="$(openssl rand -hex 16)" \
+        --from-literal=admin-password="$pw" \
+        --from-literal=bootstrap-creds="admin@*=$pw" \
+        --from-literal=db-user=artifactory \
+        --from-literal=db-password="$dbpw" \
+        --from-literal=db-url=jdbc:postgresql://postgres:5432/artifactory
+    fi
+    dbpw=$(kubectl -n "$ns" get secret artifactory -o jsonpath='{.data.db-password}' | base64 -d)
+    kubectl -n "$ns" rollout status deploy/postgres --timeout=10m
+    # Hex password, so it's safe inside the quoted \set; it goes in on stdin,
+    # not argv. Same reconcile as postgres's own entrypoint.
+    kubectl -n "$ns" exec -i deploy/postgres -- sh -c \
+      'psql -q -v ON_ERROR_STOP=1 -h /tmp -U "$POSTGRES_USER" -d postgres' <<SQL
+    \set pw '$dbpw'
+    SELECT 'CREATE ROLE artifactory LOGIN'
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'artifactory')\gexec
+    SELECT format('ALTER ROLE artifactory WITH LOGIN PASSWORD %L', :'pw')\gexec
+    SELECT 'CREATE DATABASE artifactory OWNER artifactory'
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'artifactory')\gexec
+    SQL
+    echo "artifactory Secret and database ready"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: artifactory-secrets
+  annotations:
+    # Jobs are immutable; let Flux replace it when the spec changes.
+    kustomize.toolkit.fluxcd.io/force: enabled
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      serviceAccountName: artifactory-secrets
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: init
+          image: docker.io/alpine/k8s:1.35.10
+          imagePullPolicy: IfNotPresent
+          command: [bash, /scripts/init.sh]
+          env:
+            - { name: HOME, value: /tmp }
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+      volumes:
+        - name: scripts
+          configMap: { name: artifactory-secrets }
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: jfrog
+spec:
+  interval: 24h
+  url: https://charts.jfrog.io
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: artifactory
+spec:
+  interval: 1h
+  timeout: 15m
+  chart:
+    spec:
+      chart: artifactory-jcr
+      version: 107.161.26
+      sourceRef:
+        kind: HelmRepository
+        name: jfrog
+  values:
+    artifactory:
+      postgresql:
+        enabled: false
+      database:
+        type: postgresql
+        driver: org.postgresql.Driver
+        secrets:
+          url: { name: artifactory, key: db-url }
+          user: { name: artifactory, key: db-user }
+          password: { name: artifactory, key: db-password }
+      nginx:
+        enabled: false
+      ingress:
+        enabled: true
+        className: traefik
+        # A defaultBackend would make this Ingress Traefik's catch-all for every host.
+        defaultBackend: { enabled: false }
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt
+        hosts: ["hub.${SITE_HOST}"]
+        tls:
+          - hosts: ["hub.${SITE_HOST}"]
+            secretName: artifactory-tls
+      artifactory:
+        masterKeySecretName: artifactory
+        joinKeySecretName: artifactory
+        admin:
+          secret: artifactory
+          dataKey: bootstrap-creds
+        # The Wyse has ~7.5 GiB and is already ~80% used; keep the heap small.
+        nodeSelector: { kubernetes.io/hostname: wyse }
+        persistence:
+          size: 20Gi
+        javaOpts:
+          xms: 512m
+          xmx: 1536m
+        resources:
+          requests: { cpu: 200m, memory: 1Gi }
+          limits: { memory: 2560Mi }
+      # The chart runs the UI and the event bus as separate Deployments; keep
+      # them off the 2 GB APU2 too.
+      frontend:
+        nodeSelector: { kubernetes.io/hostname: wyse }
+      jfbus:
+        nodeSelector: { kubernetes.io/hostname: wyse }

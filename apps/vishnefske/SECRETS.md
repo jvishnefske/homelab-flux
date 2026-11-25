@@ -31,6 +31,7 @@ unless `-e show_secrets=true`. Needs `kubernetes.core` (ships with the
 | `pomodoro` | vishnefske | `SESSION_SECRET`, `OIDC_CLIENT_SECRET` (Keycloak client `pomodoro`) | pomodoro |
 | `admin` | vishnefske | `SESSION_SECRET`, `OIDC_CLIENT_SECRET` (Keycloak client `admin`), `SIGNER_TOKEN`, `METRICS_TOKEN` | admin |
 | `grafana` | vishnefske | `GF_SECURITY_ADMIN_PASSWORD` (break-glass), `GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET` (Keycloak client `grafana`) | grafana |
+| `artifactory` | vishnefske | `admin-password`, `bootstrap-creds`, `master-key`, `join-key`, `db-{user,password,url}`; generated in-cluster by the `artifactory-secrets` Job (not in `secrets.env`); `just artifactory-password` | artifactory (JCR) |
 | `prometheus-scrape` | vishnefske | `token` (same value as admin's `METRICS_TOKEN`) | prometheus |
 
 ## One-time setup after the first start

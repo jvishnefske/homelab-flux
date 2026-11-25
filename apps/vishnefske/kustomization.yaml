@@ -14,6 +14,7 @@ resources:
   - pubsub.yaml
   - admin.yaml
   - monitoring.yaml
+  - artifactory.yaml
 # Grafana's provisioned dashboards. Names are fixed (no hash suffix) so the
 # Grafana Deployment can mount them by name.
 configMapGenerator:
