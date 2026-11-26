@@ -64,7 +64,8 @@ spec:
             httpGet: { path: /healthz, port: http }
           # Board enrolment (POST /api/enroll) stays off (503) until MW_PKI_BIN,
           # MW_PKI_KEY and MW_PKI_CA are set and the pod can reach the TPM's
-          # PKCS#11 token; see vishnefske.com/admin/README.md, "Enrolment".
+          # PKCS#11 token: apps/vishnefske/admin-tpm (ADMIN-TPM.md), and
+          # vishnefske.com/admin/README.md, "Enrolment".
           volumeMounts:
             - { name: data, mountPath: /data }
             # mw-pki's CSR and certificate pass through a private temp dir.

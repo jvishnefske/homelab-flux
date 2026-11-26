@@ -29,7 +29,7 @@ unless `-e show_secrets=true`. Needs `kubernetes.core` (ships with the
 | `gerrit` | vishnefske | `OAUTH_CLIENT_SECRET` (Keycloak client `gerrit`) | gerrit |
 | `nats-config` | vishnefske | `nats-server.conf` | nats |
 | `pomodoro` | vishnefske | `SESSION_SECRET`, `OIDC_CLIENT_SECRET` (Keycloak client `pomodoro`) | pomodoro |
-| `admin` | vishnefske | `SESSION_SECRET`, `OIDC_CLIENT_SECRET` (Keycloak client `admin`), `SIGNER_TOKEN`, `METRICS_TOKEN` | admin |
+| `admin` | vishnefske | `SESSION_SECRET`, `OIDC_CLIENT_SECRET` (Keycloak client `admin`), `SIGNER_TOKEN`, `METRICS_TOKEN`; optional `MW_PKI_PIN` (TPM token PIN, only with `admin-tpm/`, see `ADMIN-TPM.md`) | admin |
 | `grafana` | vishnefske | `GF_SECURITY_ADMIN_PASSWORD` (break-glass), `GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET` (Keycloak client `grafana`) | grafana |
 | `artifactory` | vishnefske | `admin-password`, `bootstrap-creds`, `master-key`, `join-key`, `db-{user,password,url}`; generated in-cluster by the `artifactory-secrets` Job (not in `secrets.env`); `just artifactory-password` | artifactory (JCR) |
 | `prometheus-scrape` | vishnefske | `token` (same value as admin's `METRICS_TOKEN`) | prometheus |
@@ -45,7 +45,9 @@ unless `-e show_secrets=true`. Needs `kubernetes.core` (ships with the
   The other secrets are `ADMIN_SESSION_SECRET`, `ADMIN_SIGNER_TOKEN`,
   `ADMIN_METRICS_TOKEN`, `GRAFANA_ADMIN_PASSWORD`. Generate the random ones with
   `openssl rand -hex 32`. The Wyse signer needs `ADMIN_SIGNER_TOKEN` too (see
-  `vishnefske.com/admin/README.md`).
+  `vishnefske.com/admin/README.md`). `ADMIN_TPM_PIN` (the Wyse's
+  tpm2-pkcs11 user PIN, becomes `admin`/`MW_PKI_PIN`) is optional and only
+  needed with `admin-tpm/` enabled; see `ADMIN-TPM.md`.
 - **Pomodoro → Keycloak login**: create a confidential client `pomodoro` in the
   `vishnefske` realm with redirect URI `https://timer.<SITE_HOST>/auth/callback`.
   Put its secret in `secrets.env` as `OIDC_POMODORO_SECRET`. The owner user

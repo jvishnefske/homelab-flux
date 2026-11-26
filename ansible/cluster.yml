@@ -80,6 +80,9 @@
           OIDC_CLIENT_SECRET: OIDC_ADMIN_SECRET
           SIGNER_TOKEN: ADMIN_SIGNER_TOKEN
           METRICS_TOKEN: ADMIN_METRICS_TOKEN
+        # Only with apps/vishnefske/admin-tpm enabled (ADMIN-TPM.md): the
+        # Wyse's tpm2-pkcs11 token PIN for board enrolment.
+        optional_env: { MW_PKI_PIN: ADMIN_TPM_PIN }
         restarts: [admin]
       - name: grafana
         env:

@@ -1,0 +1,51 @@
+# The admin pod with the TPM: board enrolment (POST /api/enroll) runs
+# `mw-pki client --key $MW_PKI_KEY $MW_PKI_CA <csr> <cn> <out>`, which signs
+# with the Zenoh (mesh) CA key on the Wyse's TPM through tpm2-pkcs11. The image
+# sets MW_PKI_BIN and PKCS11_MODULE. Host layout from edge-ca on the Wyse
+# (nixos-x86-squashfs, modules/edge-ca.nix); see ../ADMIN-TPM.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin
+spec:
+  template:
+    spec:
+      # The TPM, the token store and the CA certificate are on the Wyse.
+      nodeSelector: { kubernetes.io/hostname: wyse }
+      securityContext:
+        # Wyse gids, pinned in NixOS (ADMIN-TPM.md, "Host side"):
+        #   176   tss            owns /dev/tpmrm0 (mode 0660); containerd
+        #                        creates the device node with the host's owner
+        #   2110  edge-ca-admin  may read the tpm2-pkcs11 store
+        supplementalGroups: [176, 2110]
+      containers:
+        - name: admin
+          env:
+            - { name: MW_PKI_KEY, value: zenoh-ca } # key label in the token
+            - { name: MW_PKI_CA, value: /etc/mw-pki/ca.crt }
+            - { name: PKCS11_TOKEN, value: edge-ca } # token label
+            - { name: TPM2_PKCS11_STORE, value: /var/lib/tpm2-pkcs11 }
+            - { name: TPM2_PKCS11_TCTI, value: "device:/dev/tpmrm0" }
+            - { name: TPM2TOOLS_TCTI, value: "device:/dev/tpmrm0" }
+            # tpm2-pkcs11 probes FAPI first and logs a harmless error on
+            # every load (edge-ca filters the same line); silence it.
+            - { name: TSS2_LOG, value: "fapi+NONE" }
+            # The token's user PIN (the Wyse's /persist/secrets/edge-ca.pin).
+            # Not optional: with the component on, a missing PIN should stop
+            # the pod, not leave enrolment half-configured.
+            - name: MW_PKI_PIN
+              valueFrom: { secretKeyRef: { name: admin, key: MW_PKI_PIN } }
+          resources:
+            limits: { squat.ai/tpmrm: "1" } # /dev/tpmrm0, from tpm-device-plugin
+          volumeMounts:
+            - { name: tpm2-pkcs11, mountPath: /var/lib/tpm2-pkcs11, readOnly: true }
+            - { name: mesh-ca, mountPath: /etc/mw-pki/ca.crt, readOnly: true }
+      volumes:
+        # Key blobs wrapped by this TPM (useless elsewhere) in tpm2-pkcs11's
+        # sqlite DB. Read-only: signing writes nothing.
+        - name: tpm2-pkcs11
+          hostPath: { path: /persist/edge-ca/tpm2-pkcs11, type: Directory }
+        # The Zenoh CA certificate (`edge-ca init-zenoh`, mode 0644). Read
+        # from the host so it always matches the key in the TPM.
+        - name: mesh-ca
+          hostPath: { path: /persist/edge-ca/zenoh/ca.crt, type: File }
