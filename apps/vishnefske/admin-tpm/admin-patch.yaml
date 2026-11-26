@@ -1,7 +1,8 @@
 # The admin pod with the TPM: board enrolment (POST /api/enroll) runs
 # `mw-pki client --key $MW_PKI_KEY $MW_PKI_CA <csr> <cn> <out>`, which signs
 # with the Zenoh (mesh) CA key on the Wyse's TPM through tpm2-pkcs11. The image
-# sets MW_PKI_BIN and PKCS11_MODULE. Host layout from edge-ca on the Wyse
+# sets MW_PKI_BIN and PKCS11_MODULE (tpm2-pkcs11-esapi: esysdb store only, no
+# FAPI) and TPM2_PKCS11_TCTI; the TCTI is repeated here to keep it explicit. Host layout from edge-ca on the Wyse
 # (nixos-x86-squashfs, modules/edge-ca.nix); see ../ADMIN-TPM.md.
 apiVersion: apps/v1
 kind: Deployment
@@ -27,9 +28,6 @@ spec:
             - { name: TPM2_PKCS11_STORE, value: /var/lib/tpm2-pkcs11 }
             - { name: TPM2_PKCS11_TCTI, value: "device:/dev/tpmrm0" }
             - { name: TPM2TOOLS_TCTI, value: "device:/dev/tpmrm0" }
-            # tpm2-pkcs11 probes FAPI first and logs a harmless error on
-            # every load (edge-ca filters the same line); silence it.
-            - { name: TSS2_LOG, value: "fapi+NONE" }
             # The token's user PIN (the Wyse's /persist/secrets/edge-ca.pin).
             # Not optional: with the component on, a missing PIN should stop
             # the pod, not leave enrolment half-configured.
@@ -42,7 +40,9 @@ spec:
             - { name: mesh-ca, mountPath: /etc/mw-pki/ca.crt, readOnly: true }
       volumes:
         # Key blobs wrapped by this TPM (useless elsewhere) in tpm2-pkcs11's
-        # sqlite DB. Read-only: signing writes nothing.
+        # sqlite DB. Read-only: signing writes nothing, as long as the
+        # image's tpm2-pkcs11 has the host's version (both 1.10.0 now; else
+        # opening may migrate the schema and fail; ADMIN-TPM.md, Enable 2).
         - name: tpm2-pkcs11
           hostPath: { path: /persist/edge-ca/tpm2-pkcs11, type: Directory }
         # The Zenoh CA certificate (`edge-ca init-zenoh`, mode 0644). Read
