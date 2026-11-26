@@ -1,4 +1,5 @@
-# Pomodoro timer: owner logs in with Google OAuth, anyone can watch.
+# Pomodoro timer: owner logs in through Keycloak (OIDC, client `pomodoro` in
+# the `vishnefske` realm), anyone can watch.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -33,12 +34,13 @@ spec:
           env:
             - { name: PUBLIC_URL, value: "https://timer.${SITE_HOST}" }
             - { name: OWNER_EMAIL, value: "${POMODORO_OWNER_EMAIL}" }
+            - { name: KEYCLOAK_URL, value: "https://auth.${SITE_HOST}" }
+            - { name: KEYCLOAK_REALM, value: vishnefske }
+            - { name: OIDC_CLIENT_ID, value: pomodoro }
             - name: SESSION_SECRET
               valueFrom: { secretKeyRef: { name: pomodoro, key: SESSION_SECRET } }
-            - name: GOOGLE_CLIENT_ID
-              valueFrom: { secretKeyRef: { name: pomodoro, key: GOOGLE_CLIENT_ID, optional: true } }
-            - name: GOOGLE_CLIENT_SECRET
-              valueFrom: { secretKeyRef: { name: pomodoro, key: GOOGLE_CLIENT_SECRET, optional: true } }
+            - name: OIDC_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: pomodoro, key: OIDC_CLIENT_SECRET } }
           ports: [{ name: http, containerPort: 8080 }]
           readinessProbe:
             httpGet: { path: /, port: http }

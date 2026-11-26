@@ -1,0 +1,239 @@
+# Prometheus (scrapes the admin console's /metrics) and Grafana (Keycloak login,
+# the pubsub dashboard from grafana/pubsub.json, panels embedded by the admin
+# console). Grafana: grafana.${SITE_HOST}; Prometheus is in-cluster only.
+#
+# Images are upstream, not Nix-built (imagePullPolicy IfNotPresent), so they
+# pull from Docker Hub on first use.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 30s
+    scrape_configs:
+      - job_name: admin
+        metrics_path: /metrics
+        authorization:
+          type: Bearer
+          credentials_file: /etc/prometheus/secrets/token
+        static_configs:
+          - targets: ["admin:80"]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 2Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: prometheus }
+  template:
+    metadata:
+      labels: { app: prometheus }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: prometheus
+          image: docker.io/prom/prometheus:v3.5.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=30d
+            - --web.listen-address=:9090
+          ports: [{ name: http, containerPort: 9090 }]
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus/prometheus.yml, subPath: prometheus.yml, readOnly: true }
+            - { name: scrape-token, mountPath: /etc/prometheus/secrets, readOnly: true }
+            - { name: data, mountPath: /prometheus }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { memory: 1Gi }
+      volumes:
+        - name: config
+          configMap: { name: prometheus-config }
+        - name: scrape-token
+          secret: { secretName: prometheus-scrape }
+        - name: data
+          persistentVolumeClaim: { claimName: prometheus-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+spec:
+  selector: { app: prometheus }
+  ports: [{ name: http, port: 9090, targetPort: http }]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-provisioning
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: false
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: vishnefske
+        type: file
+        disableDeletion: true
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 1Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: grafana }
+  template:
+    metadata:
+      labels: { app: grafana }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472
+        runAsGroup: 472
+        fsGroup: 472
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: grafana
+          # Newest 12.0.x patch (Docker Hub, 2026-02-12); 12.0.0 lacked the
+          # later security releases. Bump tag and digest together.
+          image: docker.io/grafana/grafana:12.0.10@sha256:a89f6c4aacc4123fec9a850dc4db0ddbcf9a729ac00021f672288f51ac0ea23c
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: GF_SERVER_ROOT_URL, value: "https://grafana.${SITE_HOST}" }
+            # The admin console embeds these panels in an iframe on admin.${SITE_HOST}
+            # (same site, so the Lax session cookie is sent). Framing is limited to that
+            # origin by the frame-ancestors header set on the ingress (Middleware below).
+            - { name: GF_SECURITY_ALLOW_EMBEDDING, value: "true" }
+            - { name: GF_USERS_ALLOW_SIGN_UP, value: "false" }
+            - { name: GF_ANALYTICS_REPORTING_ENABLED, value: "false" }
+            - { name: GF_AUTH_ANONYMOUS_ENABLED, value: "false" }
+            # Keycloak login. Only the owner's exact, verified email gets a role (Admin).
+            # Everyone else maps to no role, and STRICT makes Grafana refuse their login,
+            # so no other account gets a Grafana user.
+            - { name: GF_AUTH_GENERIC_OAUTH_ENABLED, value: "true" }
+            - { name: GF_AUTH_GENERIC_OAUTH_NAME, value: Keycloak }
+            - { name: GF_AUTH_GENERIC_OAUTH_CLIENT_ID, value: grafana }
+            - { name: GF_AUTH_GENERIC_OAUTH_SCOPES, value: "openid email profile" }
+            - { name: GF_AUTH_GENERIC_OAUTH_AUTH_URL, value: "https://auth.${SITE_HOST}/realms/vishnefske/protocol/openid-connect/auth" }
+            - { name: GF_AUTH_GENERIC_OAUTH_TOKEN_URL, value: "https://auth.${SITE_HOST}/realms/vishnefske/protocol/openid-connect/token" }
+            - { name: GF_AUTH_GENERIC_OAUTH_API_URL, value: "https://auth.${SITE_HOST}/realms/vishnefske/protocol/openid-connect/userinfo" }
+            - { name: GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP, value: "true" }
+            - { name: GF_AUTH_GENERIC_OAUTH_EMAIL_ATTRIBUTE_PATH, value: email }
+            - { name: GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH, value: "email == '${POMODORO_OWNER_EMAIL}' && email_verified == `true` && 'Admin'" }
+            - { name: GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT, value: "true" }
+            - name: GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: grafana, key: GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET } }
+            # Local admin account kept as a break-glass login.
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: grafana, key: GF_SECURITY_ADMIN_PASSWORD } }
+          ports: [{ name: http, containerPort: 3000 }]
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/grafana }
+            - { name: provisioning, mountPath: /etc/grafana/provisioning/datasources/datasources.yaml, subPath: datasources.yaml, readOnly: true }
+            - { name: provisioning, mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml, subPath: dashboards.yaml, readOnly: true }
+            - { name: dashboards, mountPath: /var/lib/grafana/dashboards, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: grafana-data }
+        - name: provisioning
+          configMap: { name: grafana-provisioning }
+        - name: dashboards
+          configMap: { name: grafana-dashboards }
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+spec:
+  selector: { app: grafana }
+  ports: [{ name: http, port: 80, targetPort: http }]
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: grafana-frame
+spec:
+  headers:
+    customResponseHeaders:
+      Content-Security-Policy: "frame-ancestors https://admin.${SITE_HOST}"
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    traefik.ingress.kubernetes.io/router.middlewares: vishnefske-grafana-frame@kubernetescrd
+    # HTTPS only; http still redirects (see the admin Ingress in admin.yaml).
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["grafana.${SITE_HOST}"]
+      secretName: grafana-tls
+  rules:
+    - host: "grafana.${SITE_HOST}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: grafana, port: { name: http } } }

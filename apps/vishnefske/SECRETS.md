@@ -28,11 +28,29 @@ unless `-e show_secrets=true`. Needs `kubernetes.core` (ships with the
 | `gitea` | vishnefske | `GITEA__security__SECRET_KEY`, `GITEA__security__INTERNAL_TOKEN`, `GITEA__oauth2__JWT_SECRET` | gitea |
 | `gerrit` | vishnefske | `OAUTH_CLIENT_SECRET` (Keycloak client `gerrit`) | gerrit |
 | `nats-config` | vishnefske | `nats-server.conf` | nats |
-| `pomodoro` | vishnefske | `SESSION_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | pomodoro (Google keys optional until set) |
+| `pomodoro` | vishnefske | `SESSION_SECRET`, `OIDC_CLIENT_SECRET` (Keycloak client `pomodoro`) | pomodoro |
+| `admin` | vishnefske | `SESSION_SECRET`, `OIDC_CLIENT_SECRET` (Keycloak client `admin`), `SIGNER_TOKEN`, `METRICS_TOKEN`; optional `MW_PKI_PIN` (TPM token PIN, only with `admin-tpm/`, see `ADMIN-TPM.md`) | admin |
+| `grafana` | vishnefske | `GF_SECURITY_ADMIN_PASSWORD` (break-glass), `GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET` (Keycloak client `grafana`) | grafana |
+| `artifactory` | vishnefske | `admin-password`, `bootstrap-creds`, `master-key`, `join-key`, `db-{user,password,url}`; generated in-cluster by the `artifactory-secrets` Job (not in `secrets.env`); `just artifactory-password` | artifactory (JCR) |
+| `prometheus-scrape` | vishnefske | `token` (same value as admin's `METRICS_TOKEN`) | prometheus |
 
 ## One-time setup after the first start
 
 - **Gitea → Keycloak login**: done by the playbook (source named `keycloak`
   to match the realm's redirect URI `/user/oauth2/keycloak/callback`).
+- **Admin and Grafana → Keycloak login**: create confidential clients in the
+  `vishnefske` realm. `admin` redirects to `https://admin.<SITE_HOST>/auth/callback`
+  and `grafana` to `https://grafana.<SITE_HOST>/login/generic_oauth`. Their
+  secrets go in `secrets.env` as `OIDC_ADMIN_SECRET` and `OIDC_GRAFANA_SECRET`.
+  The other secrets are `ADMIN_SESSION_SECRET`, `ADMIN_SIGNER_TOKEN`,
+  `ADMIN_METRICS_TOKEN`, `GRAFANA_ADMIN_PASSWORD`. Generate the random ones with
+  `openssl rand -hex 32`. The Wyse signer needs `ADMIN_SIGNER_TOKEN` too (see
+  `vishnefske.com/admin/README.md`). `ADMIN_TPM_PIN` (the Wyse's
+  tpm2-pkcs11 user PIN, becomes `admin`/`MW_PKI_PIN`) is optional and only
+  needed with `admin-tpm/` enabled; see `ADMIN-TPM.md`.
+- **Pomodoro → Keycloak login**: create a confidential client `pomodoro` in the
+  `vishnefske` realm with redirect URI `https://timer.<SITE_HOST>/auth/callback`.
+  Put its secret in `secrets.env` as `OIDC_POMODORO_SECRET`. The owner user
+  (`POMODORO_OWNER_EMAIL`) needs a verified email address in Keycloak.
 - **Keycloak users**: the realm is imported without users; create them in the
   admin console. The first account to log in to Gerrit becomes its administrator.

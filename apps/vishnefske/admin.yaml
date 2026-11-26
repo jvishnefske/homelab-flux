@@ -1,0 +1,198 @@
+# Middleware admin console (admin.${SITE_HOST}): owner-only login through
+# Keycloak (client `admin`), NATS channel metrics, mTLS certificate requests
+# that the Wyse signer fulfils, and /metrics for Prometheus. Source:
+# vishnefske.com/admin. Holds no CA key: signing happens on the Wyse. Board
+# enrolment (POST /api/enroll) signs in this pod only with `admin-tpm/`
+# enabled; see ADMIN-TPM.md.
+#
+# Exposure: the Ingress `admin` serves everything on the host, including
+# POST /api/enroll (public on purpose: operators enrol boards from anywhere
+# with a Keycloak bearer token). The IngressRoute `admin-internal` at the end
+# takes two path prefixes away from it: /metrics (Prometheus scrapes the
+# Service, never the Ingress) and /api/signer/ (the Wyse signer only).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: admin-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 100Mi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: admin }
+  template:
+    metadata:
+      labels: { app: admin }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: admin
+          image: vishnefske/admin
+          imagePullPolicy: Never
+          env:
+            - { name: PUBLIC_URL, value: "https://admin.${SITE_HOST}" }
+            - { name: OWNER_EMAIL, value: "${POMODORO_OWNER_EMAIL}" }
+            - { name: KEYCLOAK_URL, value: "https://auth.${SITE_HOST}" }
+            - { name: KEYCLOAK_REALM, value: vishnefske }
+            - { name: OIDC_CLIENT_ID, value: admin }
+            - { name: NATS_MONITOR_URL, value: "http://pubsub:8222" }
+            - { name: GRAFANA_URL, value: "https://grafana.${SITE_HOST}" }
+            - { name: GRAFANA_DASHBOARD, value: pubsub }
+            - { name: DATA_DIR, value: /data }
+            - name: SESSION_SECRET
+              valueFrom: { secretKeyRef: { name: admin, key: SESSION_SECRET } }
+            - name: OIDC_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: admin, key: OIDC_CLIENT_SECRET } }
+            - name: SIGNER_TOKEN
+              valueFrom: { secretKeyRef: { name: admin, key: SIGNER_TOKEN } }
+            - name: METRICS_TOKEN
+              valueFrom: { secretKeyRef: { name: admin, key: METRICS_TOKEN } }
+          ports: [{ name: http, containerPort: 8080 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+          # Board enrolment (POST /api/enroll) stays off (503) until MW_PKI_BIN,
+          # MW_PKI_KEY and MW_PKI_CA are set and the pod can reach the TPM's
+          # PKCS#11 token: apps/vishnefske/admin-tpm (ADMIN-TPM.md), and
+          # vishnefske.com/admin/README.md, "Enrolment".
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            # mw-pki's CSR and certificate pass through a private temp dir.
+            - { name: tmp, mountPath: /tmp }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: admin-data }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin
+spec:
+  selector: { app: admin }
+  ports: [{ name: http, port: 80, targetPort: http }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: admin
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    # HTTPS only, like admin-internal below, so no route on port 80 reaches
+    # the app. Plain http still redirects: the web entrypoint's redirection
+    # (traefik-config.yaml) is a catch-all router of its own, not part of
+    # this Ingress, and the ACME challenge it lets through is served by
+    # cert-manager's own solver Ingress. Without this, /metrics and
+    # /api/signer/ on port 80 would be guarded only by that redirect.
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["admin.${SITE_HOST}"]
+      secretName: admin-tls
+  rules:
+    - host: "admin.${SITE_HOST}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: admin, port: { name: http } } }
+---
+# Paths that the public Ingress above must not serve. These routes win over it
+# (priority 1000; the Ingress router's priority is the length of its rule).
+# Both still need their bearer token at the app; this only shrinks who can try.
+#
+# - /metrics: Prometheus scrapes admin:80 inside the cluster, so the Ingress
+#   answers 403 to everyone (`admin-nobody`).
+# - /api/signer/: only the LAN and the cluster (`admin-lan`). The signer on
+#   the Wyse (the k3s server) calls https://admin.${SITE_HOST}/api/signer/...
+#
+# Why the source address Traefik sees can be trusted here, and when not:
+# - Internet: the router port-forwards 443 (DNAT, no SNAT) to the APU2.
+#   Traefik's LoadBalancer Service has externalTrafficPolicy Local
+#   (infrastructure/controllers/traefik-config.yaml), so kube-proxy (iptables
+#   mode) takes traffic for the load-balancer address (the node's IP) before
+#   ServiceLB's hostPort does and hands it to the node's own Traefik without
+#   SNAT: RemoteAddr is the client's real address. ipAllowList without an
+#   ipStrategy checks RemoteAddr, never X-Forwarded-For, so a forged header
+#   doesn't help.
+# - Cluster and LAN: pods resolve admin.${SITE_HOST} to the APU2
+#   (infrastructure/configs/coredns-custom.yaml) and arrive from a pod address
+#   (10.42.0.0/16), or from a node's cni0/flannel address when kube-proxy
+#   masquerades host traffic, which is how the Wyse's signer arrives. Hosts on
+#   the LAN arrive from their LAN address.
+# - Limits. (1) If the router ever SNATs port-forwarded traffic (some
+#   "NAT loopback" settings do), every internet client looks like the router,
+#   which is inside the LAN range: narrow 192.168.1.0/24 to the Wyse's own
+#   address. (2) If traffic ever went through the ServiceLB (svclb) pod
+#   instead (kube-proxy not in iptables mode, or a node-external-ip that
+#   makes the LB address differ from the node IP), klipper-lb masquerades it
+#   and every client looks like a 10.42.x.x pod: the allow-list would admit
+#   the internet. (3) Path tricks like /x/../metrics are cleaned before
+#   matching only from Traefik v3.3.6 (sanitizePath); the app's URL parser
+#   resolves them too. Check after every Traefik or k3s upgrade, from outside
+#   the LAN (e.g. a phone on mobile data):
+#     curl -si https://admin.${SITE_HOST}/api/signer/pending | head -1   # 403, not 401
+#     curl -si https://admin.${SITE_HOST}/metrics | head -1              # 403
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: admin-nobody
+spec:
+  ipAllowList:
+    # The unspecified address is never a packet's source: always 403.
+    sourceRange: ["0.0.0.0/32"]
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: admin-lan
+spec:
+  ipAllowList:
+    sourceRange:
+      - 10.42.0.0/16 # k3s default pod CIDR
+      - 10.43.0.0/16 # k3s default service CIDR
+      # The home LAN. Must match the real LAN range (the APU2's address in
+      # coredns-custom.yaml is in it); narrow it to the Wyse's address if
+      # only the signer needs it.
+      - 192.168.1.0/24
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: admin-internal
+spec:
+  entryPoints: [websecure]
+  routes:
+    - kind: Rule
+      match: Host(`admin.${SITE_HOST}`) && PathPrefix(`/metrics`)
+      priority: 1000
+      middlewares: [{ name: admin-nobody }]
+      services: [{ name: admin, port: 80 }]
+    - kind: Rule
+      match: Host(`admin.${SITE_HOST}`) && PathPrefix(`/api/signer/`)
+      priority: 1000
+      middlewares: [{ name: admin-lan }]
+      services: [{ name: admin, port: 80 }]
+  # The certificate cert-manager issues for the Ingress `admin`.
+  tls:
+    secretName: admin-tls

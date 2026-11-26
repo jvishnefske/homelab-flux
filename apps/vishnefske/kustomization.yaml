@@ -12,6 +12,16 @@ resources:
   - gerrit.yaml
   - nats.yaml
   - pubsub.yaml
+  - admin.yaml
+  - monitoring.yaml
+  - artifactory.yaml
+# Grafana's provisioned dashboards. Names are fixed (no hash suffix) so the
+# Grafana Deployment can mount them by name.
+configMapGenerator:
+  - name: grafana-dashboards
+    files: [grafana/pubsub.json]
+generatorOptions:
+  disableNameSuffixHash: true
 # Nix-built images, preloaded on the nodes (imagePullPolicy: Never).
 # newTag = git rev of the vishnefske.com repo; bumped by deploy-site.sh.
 images:
@@ -22,3 +32,4 @@ images:
   - { name: vishnefske/gitea, newTag: "8684979" }
   - { name: vishnefske/gerrit, newTag: "8684979" }
   - { name: vishnefske/nats, newTag: "8684979" }
+  - { name: vishnefske/admin, newTag: "8684979" }

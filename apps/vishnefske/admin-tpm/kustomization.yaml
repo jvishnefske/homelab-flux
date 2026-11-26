@@ -1,0 +1,9 @@
+# TPM signing for the admin pod (board enrolment). Committed, not enabled:
+# see ../ADMIN-TPM.md. Enable with `components: [admin-tpm]` in
+# ../kustomization.yaml.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - device-plugin.yaml
+patches:
+  - path: admin-patch.yaml

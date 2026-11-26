@@ -1,0 +1,60 @@
+# Advertises the Wyse's TPM resource manager (/dev/tpmrm0) to the kubelet as
+# the extended resource squat.ai/tpmrm, so a pod that requests it gets that
+# one device node and nothing else, without being privileged.
+#
+# Upstream manifest: github.com/squat/generic-device-plugin,
+# manifests/generic-device-plugin.yaml (same security context: no
+# privileges, no capabilities; it needs /dev to find the device and the
+# kubelet's device-plugins dir for its socket).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: tpm-device-plugin
+  labels: { app: tpm-device-plugin }
+spec:
+  selector:
+    matchLabels: { app: tpm-device-plugin }
+  template:
+    metadata:
+      labels: { app: tpm-device-plugin }
+    spec:
+      # The CA keys live in the Wyse's TPM (edge-ca). The APU2 is left out
+      # even if it has a TPM: its store would be a different one.
+      nodeSelector: { kubernetes.io/hostname: wyse }
+      tolerations:
+        - { operator: Exists, effect: NoSchedule }
+        - { operator: Exists, effect: NoExecute }
+      automountServiceAccountToken: false
+      containers:
+        - name: generic-device-plugin
+          # Tag f7c3291 (upstream commit, pushed 2026-10-26), pinned by its
+          # multi-arch index digest. Bump both together.
+          image: docker.io/squat/generic-device-plugin:f7c3291@sha256:8dc84958301f054bf72d9753a7a2c9af3d6642a9844b34d1171b3f2cdb4a15f6
+          imagePullPolicy: IfNotPresent
+          args:
+            - --device
+            # count 1: one pod (the admin) holds the device at a time.
+            - |
+              name: tpmrm
+              groups:
+                - count: 1
+                  paths:
+                    - path: /dev/tpmrm0
+          ports: [{ name: http, containerPort: 8080 }]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+            seccompProfile: { type: RuntimeDefault }
+          resources:
+            requests: { cpu: 10m, memory: 10Mi }
+            limits: { memory: 20Mi }
+          volumeMounts:
+            - { name: device-plugins, mountPath: /var/lib/kubelet/device-plugins }
+            - { name: dev, mountPath: /dev, readOnly: true }
+      volumes:
+        # k3s's kubelet keeps the standard root dir, /var/lib/kubelet.
+        - name: device-plugins
+          hostPath: { path: /var/lib/kubelet/device-plugins, type: Directory }
+        - name: dev
+          hostPath: { path: /dev, type: Directory }
