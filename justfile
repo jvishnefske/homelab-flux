@@ -1,7 +1,7 @@
 kubeconfig := env_var_or_default("KUBECONFIG", env_var("HOME") + "/.kube/homelab.yaml")
 kubectl := "kubectl --kubeconfig " + kubeconfig + " -n vishnefske"
 
-# Artifactory (hub.vishnefske.com) admin password, generated in-cluster.
+# Artifactory (hub.<SITE_HOST>) admin password, generated in-cluster.
 artifactory-password:
     @{{kubectl}} get secret artifactory -o jsonpath='{.data.admin-password}' | base64 -d; echo
 
