@@ -141,7 +141,9 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: grafana
-          image: docker.io/grafana/grafana:12.0.0
+          # Newest 12.0.x patch (Docker Hub, 2026-02-12); 12.0.0 lacked the
+          # later security releases. Bump tag and digest together.
+          image: docker.io/grafana/grafana:12.0.10@sha256:a89f6c4aacc4123fec9a850dc4db0ddbcf9a729ac00021f672288f51ac0ea23c
           imagePullPolicy: IfNotPresent
           env:
             - { name: GF_SERVER_ROOT_URL, value: "https://grafana.${SITE_HOST}" }
