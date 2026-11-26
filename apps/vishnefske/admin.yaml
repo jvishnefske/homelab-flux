@@ -97,6 +97,13 @@ metadata:
   name: admin
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt
+    # HTTPS only, like admin-internal below, so no route on port 80 reaches
+    # the app. Plain http still redirects: the web entrypoint's redirection
+    # (traefik-config.yaml) is a catch-all router of its own, not part of
+    # this Ingress, and the ACME challenge it lets through is served by
+    # cert-manager's own solver Ingress. Without this, /metrics and
+    # /api/signer/ on port 80 would be guarded only by that redirect.
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:
   ingressClassName: traefik
   tls:
